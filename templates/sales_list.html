@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Sales & Reports</h2>
+
+<div class="filter-row">
+  <label>Start
+    <input type="date" id="start" value="{{ today }}">
+  </label>
+  <label>End
+    <input type="date" id="end" value="{{ today }}">
+  </label>
+  <button id="loadSales" class="btn">Load</button>
+  <a id="downloadPdf" class="btn btn-primary" href="#">Download PDF</a>
+</div>
+
+<div id="salesResults"></div>
+{% endblock %}

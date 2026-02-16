@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Achameyelesh Chefo - Sales Recorder</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+  <header class="site-header">
+    <div class="container">
+      <h1>Achameyelesh Chefo</h1>
+      <nav>
+        <a href="{{ url_for('index') }}">Record Sale</a>
+        <a href="{{ url_for('sales_list') }}">View / Report</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="container">
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer class="site-footer">
+    <div class="container">
+      <small>&copy; {{ now().year }} Achameyelesh Chefo</small>
+    </div>
+  </footer>
+
+  <script>
+    const ITEMS = {{ items|tojson if items is defined else '[]' }};
+    const PRICE_CONFIG = {{ price_config|tojson if price_config is defined else '{}' }};
+    const BANKS = {{ banks|tojson if banks is defined else '[]' }};
+  </script>
+  <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+</body>
+</html>
