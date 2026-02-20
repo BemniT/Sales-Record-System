@@ -1,81 +1,228 @@
 {% extends "base.html" %}
 {% block content %}
-<h2>Record a Sale</h2>
+<script>
+  window.CURRENT_USER = {
+    role: "{{ tmpl_user.role if tmpl_user else '' }}",
+    place: "{{ tmpl_user.place if tmpl_user else '' }}",
+    username: "{{ tmpl_user.username if tmpl_user else '' }}"
+  };
+</script>
 
-<form id="saleForm">
-  <div class="row">
-    <label>Salesman
-      <!-- changed to select; will be populated by client JS from /api/config -->
-      <select name="salesman" id="salesman" required>
-        <option value="">Loading...</option>
-      </select>
-    </label>
-
-    <label>Place
-      <select name="place" id="place">
-        <option>Main Store</option>
-        <option>Outlet Van 1</option>
-        <option>Outlet Van 2</option>
-        <option>Dawa</option>
-        <option>Shet</option>
-      </select>
-    </label>
-
-    <label>Date
-      <input type="date" name="date" id="date" value="{{ now().date().isoformat() }}">
-    </label>
-  </div>
-
-  <h3>Items (enter crates)</h3>
-  <table class="items-table" id="itemsTable">
-    <thead>
-      <tr>
-        <th>Item</th>
-        <th>Crates</th>
-        <th>Price / crate</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for name in items %}
-      <tr data-name="{{ name }}">
-        <td class="item-name">{{ name }}</td>
-        <td><input type="number" min="0" class="crates" value="0"></td>
-        <td><input type="number" step="0.01" min="0" class="price" data-default="0"></td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-
-  <h3>Payments</h3>
-  <div class="row">
-    <label>Cash
-      <input type="number" step="0.01" min="0" id="cash" value="0">
-    </label>
-    {% for b in banks %}
-    <label>{{ b }}
-      <input type="number" step="0.01" min="0" class="bank-amt" data-bank="{{ b }}" value="0">
-    </label>
-    {% endfor %}
-  </div>
-
-  <div class="row">
-    <label>Invoice total (as per invoice)
-      <input type="number" step="0.01" min="0" id="invoice_total" value="0">
-    </label>
-
-    <div class="totals">
-      <div>Total crates: <span id="totalCrates">0</span></div>
-      <div>Sales total: <strong id="salesTotal">0.00</strong></div>
-      <div>Paid total: <strong id="paidTotal">0.00</strong></div>
-      <div>Difference (paid - sales): <strong id="difference">0.00</strong></div>
+<div class="h-hero d-flex align-items-center justify-content-between mb-3">
+  <div style="flex:1">
+    <div class="title">Record a Sale</div>
+    <div class="text-muted" style="font-size:0.95rem">
+      Add bank payments as they arrive. At the end of the day enter per-item crates (the system computes Total Sales),
+      then submit totals once — bank payments and expenses are snapshotted into the version.
     </div>
   </div>
-
-  <div class="form-actions">
-    <button type="submit" class="btn btn-primary" id="saveBtn">Save Sale</button>
-    <button type="button" id="clearBtn" class="btn">Clear</button>
+  <div style="min-width:220px;text-align:right">
+    {% if tmpl_user %}
+      <div class="text-muted" style="font-size:0.85rem">Signed in as</div>
+      <div><strong>{{ tmpl_user.username }}</strong> <span class="text-muted">({{ tmpl_user.role }})</span></div>
+    {% else %}
+      <a class="btn btn-outline-primary" href="{{ url_for('login_page') }}">Sign in</a>
+    {% endif %}
   </div>
-</form>
+</div>
 
-<div id="message" class="message"></div>
+<div class="card mb-3">
+  <div class="card-body">
+    <form id="salesContainer">
+      <div class="row g-3 mb-3">
+        <div class="col-md-6">
+          <label class="form-label">Salesman</label>
+          <select name="salesman" id="salesman" class="form-select" required>
+            <option value="">Loading...</option>
+          </select>
+        </div>
+        <div class="col-md-3">
+          <label class="form-label">Place</label>
+          <select name="place" id="place" class="form-select">
+            {% for p in places %}
+            <option>{{ p }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="col-md-3">
+          <label class="form-label">Date</label>
+          <input type="date" name="date" id="date" class="form-control" value="{{ today }}">
+        </div>
+      </div>
+
+      <hr>
+
+      <h6 class="mb-2">Items — enter crates (per-item prices used to compute totals)</h6>
+      <div class="table-responsive mb-3">
+        <table class="items-table table table-sm" id="itemsTable">
+          <thead>
+            <tr>
+              <th>Item</th>
+              <th style="width:120px">Crates</th>
+              <th style="width:160px">Price / crate</th>
+              <th style="width:120px">Subtotal</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for name in items %}
+            <tr data-name="{{ name }}">
+              <td class="item-name">{{ name }}</td>
+              <td><input type="number" min="0" class="form-control crates" value="0"></td>
+              <td><input type="number" step="0.01" min="0" class="form-control price" data-default="0"></td>
+              <td class="text-end item-subtotal">0.00</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+
+      <div class="row g-3 mb-3">
+        <div class="col-md-4">
+          <label class="form-label">Computed total (auto)</label>
+          <input id="computed_total" type="text" class="form-control" readonly value="0.00">
+        </div>
+        <div class="col-md-4">
+          <label class="form-label">Total crates</label>
+          <input id="computed_crates" type="text" class="form-control" readonly value="0">
+        </div>
+        <div class="col-md-4">
+          <label class="form-label">Total paid (preview)</label>
+          <input id="paid_preview" type="text" class="form-control" readonly value="0.00">
+        </div>
+      </div>
+
+      <hr>
+
+      <!-- Bank-entry panel -->
+      <div class="card mb-3">
+        <div class="card-body">
+          <h6 class="mb-3">Add Bank Payment</h6>
+          <div class="row g-2 align-items-end">
+            <div class="col-md-3">
+              <label class="form-label small">Bank</label>
+              <select id="bankBank" class="form-select">
+                {% for b in banks %}
+                <option>{{ b }}</option>
+                {% endfor %}
+              </select>
+            </div>
+            <div class="col-md-3">
+              <label class="form-label small">Amount</label>
+              <input id="bankAmount" type="number" step="0.01" min="0" class="form-control">
+            </div>
+            <div class="col-md-4">
+              <label class="form-label small">Customer (optional)</label>
+              <input id="bankCustomer" type="text" class="form-control" placeholder="Customer name on statement">
+            </div>
+            <div class="col-md-2 d-grid">
+              <button id="addBankBtn" class="btn btn-outline-success">Add bank payment</button>
+            </div>
+          </div>
+
+          <hr class="my-3">
+
+          <div>
+            <h6 class="mb-2">Bank Entries for <span id="bePlaceLabel">{{ today }}</span></h6>
+            <div id="bankEntriesList" class="list-group mb-2">Loading...</div>
+            <div class="d-flex justify-content-end">
+              <div class="me-3"><strong>Bank total:</strong> <span id="bankTotalDisplay">0.00</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Expenses (collapsible) -->
+      <div class="card mb-3">
+        <div class="card-header d-flex justify-content-between align-items-center" style="cursor:pointer" id="expensesHeader">
+          <strong>Expenses</strong>
+          <button id="toggleExpensesBtn" class="btn btn-sm btn-outline-secondary">Show</button>
+        </div>
+        <div class="card-body" id="expensesBody" style="display:none">
+          <div class="row g-2 align-items-end mb-3">
+            <div class="col-md-3">
+              <label class="form-label small">Amount</label>
+              <input id="expAmount" type="number" step="0.01" min="0" class="form-control">
+            </div>
+            <div class="col-md-7">
+              <label class="form-label small">Reason / description</label>
+              <input id="expDesc" type="text" class="form-control" placeholder="e.g. fuel, supplies">
+            </div>
+            <div class="col-md-2 d-grid">
+              <button id="addExpenseBtn" class="btn btn-outline-danger">Add expense</button>
+            </div>
+          </div>
+
+          <div>
+            <h6 class="mb-2">Expenses for <span id="expPlaceLabel">{{ today }}</span></h6>
+            <div id="expensesList" class="list-group mb-2">Loading...</div>
+            <div class="d-flex justify-content-end">
+              <div class="me-3"><strong>Expenses total:</strong> <span id="expensesTotalDisplay">0.00</span></div>
+            </div>
+            <small class="text-muted">Expenses will be subtracted from cash when submitting totals.</small>
+          </div>
+        </div>
+      </div>
+
+      <!-- Submit totals panel (single submit) -->
+      <div class="card mb-3">
+        <div class="card-body">
+          <h6 class="mb-3">End of day — Submit totals (single submit)</h6>
+          <div class="row g-2 align-items-end">
+            <div class="col-md-4">
+              <label class="form-label small">Total sales (computed from items or override)</label>
+              <input id="totalSalesInput" type="number" step="0.01" min="0" class="form-control" placeholder="Computed from items or override">
+            </div>
+            <div class="col-md-3">
+              <label class="form-label small">Bank total (computed)</label>
+              <input id="bankTotalInput" type="text" class="form-control" readonly value="0.00">
+            </div>
+            <div class="col-md-3">
+              <label class="form-label small">Cash total (enter to override / optional)</label>
+              <input id="cashOverride" type="number" step="0.01" min="0" class="form-control" placeholder="Optional: enter actual cash">
+            </div>
+            <div class="col-md-2 d-grid">
+              <button id="submitTotalsBtn" class="btn btn-primary">Submit totals</button>
+            </div>
+          </div>
+          <small class="text-muted d-block mt-2">
+            Only a single submission is required: bank payments and expenses are added individually; at the end of day submit totals once.
+          </small>
+        </div>
+      </div>
+
+      <div class="d-flex gap-2">
+        <button type="button" id="clearBtn" class="btn btn-outline-secondary">Clear</button>
+        <div id="message" class="message mt-2"></div>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Confirmation modal for submitting totals -->
+<div class="modal fade" id="confirmSubmitModal" tabindex="-1" aria-labelledby="confirmSubmitModalLabel" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Confirm submit totals</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <p>You're about to submit the day's totals. This will snapshot bank payments and expenses into a versioned report.</p>
+        <p>
+          <strong>Date:</strong> <span id="modalDate"></span><br>
+          <strong>Place:</strong> <span id="modalPlace"></span><br>
+          <strong>Total sales:</strong> <span id="modalTotalSales"></span><br>
+          <strong>Bank total:</strong> <span id="modalBankTotal"></span><br>
+          <strong>Expenses total:</strong> <span id="modalExpensesTotal"></span><br>
+          <strong>Cash (after expenses):</strong> <span id="modalCashTotal"></span>
+        </p>
+        <p class="text-danger small">After submitting, bank entries and expenses will be marked consumed by this report version.</p>
+      </div>
+      <div class="modal-footer">
+        <button id="confirmCancelBtn" type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button id="confirmSubmitBtn" type="button" class="btn btn-primary">Confirm Submit</button>
+      </div>
+    </div>
+  </div>
+</div>
 {% endblock %}

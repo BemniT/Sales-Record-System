@@ -9,9 +9,33 @@
   <label>End
     <input type="date" id="end" value="{{ today }}">
   </label>
+
+  <label>Place
+    <select id="filterPlace">
+      <option value="">All</option>
+      {% for p in places %}
+      <option value="{{ p }}">{{ p }}</option>
+      {% endfor %}
+    </select>
+  </label>
+
+  <label>Period
+    <select id="reportPeriod">
+      <option value="daily">Daily</option>
+      <option value="weekly">Weekly</option>
+      <option value="monthly">Monthly</option>
+    </select>
+  </label>
+
   <button id="loadSales" class="btn">Load</button>
+  <button id="closeDayBtn" class="btn">Close Day (selected place)</button>
+  <button id="showBankPayments" class="btn">Show Bank Payments</button>
   <a id="downloadPdf" class="btn btn-primary" href="#">Download PDF</a>
 </div>
 
 <div id="salesResults"></div>
+
+<div id="closeDayResult" style="margin-top:1rem;background:#fff;padding:1rem;border-radius:8px;display:none"></div>
+
+<div id="bankPaymentsResult" style="margin-top:1rem;background:#fff;padding:1rem;border-radius:8px;display:none"></div>
 {% endblock %}

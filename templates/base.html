@@ -1,37 +1,75 @@
 <!doctype html>
 <html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Achameyelesh Chefo - Sales Recorder</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
-</head>
-<body>
-  <header class="site-header">
-    <div class="container">
-      <h1>Achameyelesh Chefo</h1>
-      <nav>
-        <a href="{{ url_for('index') }}">Record Sale</a>
-        <a href="{{ url_for('sales_list') }}">View / Report</a>
-      </nav>
-    </div>
-  </header>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>{{ title or "Achamyelesh Chefo" }}</title>
 
-  <main class="container">
-    {% block content %}{% endblock %}
-  </main>
+    <!-- Google font -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;800&display=swap" rel="stylesheet">
+    <!-- Bootstrap -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <!-- App CSS -->
+    <link href="{{ url_for('static', filename='css/style.css') }}" rel="stylesheet">
 
-  <footer class="site-footer">
-    <div class="container">
-      <small>&copy; {{ now().year }} Achameyelesh Chefo</small>
-    </div>
-  </footer>
+  </head>
+  <body>
+    <nav class="navbar navbar-expand-lg navbar-light bg-white border-bottom fixed-top">
+      <div class="container">
+        {# Role-aware brand link: owner -> owner dashboard, others -> sales entry #}
+        {% if tmpl_user %}
+          {% if tmpl_user.role == 'owner' %}
+            <a class="navbar-brand d-flex align-items-center gap-2" href="{{ url_for('owner_dashboard') }}">
+          {% else %}
+            <a class="navbar-brand d-flex align-items-center gap-2" href="{{ url_for('sales_list_page') }}">
+          {% endif %}
+        {% else %}
+          <a class="navbar-brand d-flex align-items-center gap-2" href="{{ url_for('index') }}">
+        {% endif %}
+          <span class="brand-badge"></span>
+          <span class="brand-title">AChamyelesh Chef</span>
+        </a>
 
-  <script>
-    const ITEMS = {{ items|tojson if items is defined else '[]' }};
-    const PRICE_CONFIG = {{ price_config|tojson if price_config is defined else '{}' }};
-    const BANKS = {{ banks|tojson if banks is defined else '[]' }};
-  </script>
-  <script src="{{ url_for('static', filename='js/main.js') }}"></script>
-</body>
+        <div class="collapse navbar-collapse">
+          <ul class="navbar-nav me-auto mb-2 mb-lg-0">
+            {% if tmpl_user %}
+              {% if tmpl_user.role == 'owner' %}
+                <li class="nav-item"><a class="nav-link" href="{{ url_for('owner_dashboard') }}">Dashboard</a></li>
+              {% else %}
+                <li class="nav-item"><a class="nav-link" href="{{ url_for('index') }}">Sales</a></li>
+                <li class="nav-item"><a class="nav-link" href="{{ url_for('sales_list_page') }}">Sales Report</a></li>
+              {% endif %}
+            {% endif %}
+          </ul>
+          <ul class="navbar-nav ms-auto">
+            {% if tmpl_user %}
+              <li class="nav-item me-2"><span class="nav-link text-muted">Signed in: <strong>{{ tmpl_user.username }}</strong></span></li>
+              <li class="nav-item"><a class="btn btn-outline-secondary btn-sm" href="{{ url_for('logout') }}">Logout</a></li>
+            {% else %}
+              <li class="nav-item"><a class="btn btn-outline-primary btn-sm" href="{{ url_for('login_page') }}">Sign in</a></li>
+            {% endif %}
+          </ul>
+        </div>
+      </div>
+    </nav>
+
+    <main class="container py-5 mt-4">
+      {% with messages = get_flashed_messages() %}
+        {% if messages %}
+          <div class="alert alert-info">
+            {% for msg in messages %}{{ msg }}<br>{% endfor %}
+          </div>
+        {% endif %}
+      {% endwith %}
+      {% block content %}{% endblock %}
+    </main>
+
+    <footer class="text-center text-muted py-4">
+      <small>SalesSys — traceable daily reports</small>
+    </footer>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/owner.js') }}"></script>
+  </body>
 </html>

@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="row justify-content-center">
+  <div class="col-md-6">
+    <div class="card mt-4">
+      <div class="card-body">
+        <h3 class="card-title">Initial setup — create first user</h3>
+        {% if error %}
+        <div class="alert alert-danger">{{ error }}</div>
+        {% endif %}
+        <form method="post">
+          <div class="mb-3">
+            <label class="form-label">Username</label>
+            <input name="username" class="form-control" />
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Password</label>
+            <input type="password" name="password" class="form-control" />
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Role</label>
+            <select name="role" class="form-select">
+              <option value="owner">Owner</option>
+              <option value="dataman">Dataman</option>
+              <option value="van">Van</option>
+            </select>
+          </div>
+          <div class="d-grid">
+            <button class="btn btn-success">Create user</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="row justify-content-center">
+  <div class="col-md-5">
+    <div class="card p-4 mt-5">
+      <h4 class="mb-3">Sign in</h4>
+      {% if error %}
+        <div class="alert alert-danger">{{ error }}</div>
+      {% endif %}
+      <form method="post" action="{{ url_for('login_submit') }}">
+        <div class="mb-3">
+          <label class="form-label">Username</label>
+          <input name="username" class="form-control" />
+        </div>
+        <div class="mb-3">
+          <label class="form-label">Password</label>
+          <input type="password" name="password" class="form-control" />
+        </div>
+        <div class="d-grid">
+          <button class="btn btn-primary" type="submit">Sign in</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+{% endblock %}
