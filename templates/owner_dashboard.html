@@ -38,6 +38,11 @@
 
 <div id="summaryArea" class="row g-3"></div>
 
+<!-- Aggregate table for per-item crates across places/dates -->
+<div id="aggregateArea" class="mt-4">
+  <!-- reports.js will populate this with a responsive table -->
+</div>
+
 <!-- Versions modal -->
 <div class="modal fade" id="versionsModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-xl modal-dialog-scrollable">
@@ -96,5 +101,20 @@
   </div>
 </div>
 
+
+<!-- Add this block (sales details modal) above the reports.js include in owner_dashboard.html -->
+
+<!-- Details modal (shared) -->
+<div class="modal fade" id="salesModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 id="salesModalTitle" class="modal-title">Details</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body" id="salesModalBody"></div>
+    </div>
+  </div>
+</div>
 <script src="{{ url_for('static', filename='js/reports.js') }}"></script>
 {% endblock %}

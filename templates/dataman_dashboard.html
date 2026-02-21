@@ -10,7 +10,6 @@
   </div>
 
   <div class="d-flex gap-2 align-items-end">
-    <a class="btn btn-outline-primary btn-sm" href="{{ url_for('index') }}"><i class="bi bi-journal-plus me-1"></i>Register Sales</a>
     <div>
       <label class="form-label small mb-1">Start</label>
       <input id="start" type="date" class="form-control form-control-sm" value="{{ today }}">
@@ -26,6 +25,11 @@
 </div>
 
 <div id="summaryArea" class="row g-3"></div>
+
+<!-- Aggregate table for per-item crates across places/dates -->
+<div id="aggregateArea" class="mt-4">
+  <!-- reports.js will populate this with a responsive table -->
+</div>
 
 <!-- Versions modal (shared) -->
 <div class="modal fade" id="versionsModal" tabindex="-1" aria-hidden="true">
@@ -81,6 +85,21 @@
           </div>
         </form>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- Add this block (sales details modal) above the reports.js include in dataman_dashboard.html -->
+
+<!-- Details modal (shared) -->
+<div class="modal fade" id="salesModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 id="salesModalTitle" class="modal-title">Details</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body" id="salesModalBody"></div>
     </div>
   </div>
 </div>

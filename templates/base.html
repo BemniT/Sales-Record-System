@@ -16,10 +16,12 @@
   <body>
     <nav class="navbar navbar-expand-lg navbar-light bg-white border-bottom fixed-top">
       <div class="container">
-        {# Role-aware brand link: owner -> owner dashboard, others -> sales entry #}
+        {# Role-aware brand link: owner -> owner dashboard, dataman -> sales entry, others -> sales list #}
         {% if tmpl_user %}
           {% if tmpl_user.role == 'owner' %}
             <a class="navbar-brand d-flex align-items-center gap-2" href="{{ url_for('owner_dashboard') }}">
+          {% elif tmpl_user.role == 'dataman' %}
+            <a class="navbar-brand d-flex align-items-center gap-2" href="{{ url_for('index') }}">
           {% else %}
             <a class="navbar-brand d-flex align-items-center gap-2" href="{{ url_for('sales_list_page') }}">
           {% endif %}
@@ -27,7 +29,7 @@
           <a class="navbar-brand d-flex align-items-center gap-2" href="{{ url_for('index') }}">
         {% endif %}
           <span class="brand-badge"></span>
-          <span class="brand-title">AChamyelesh Chef</span>
+          <span class="brand-title">AChamyelesh Chefo</span>
         </a>
 
         <div class="collapse navbar-collapse">
@@ -35,6 +37,10 @@
             {% if tmpl_user %}
               {% if tmpl_user.role == 'owner' %}
                 <li class="nav-item"><a class="nav-link" href="{{ url_for('owner_dashboard') }}">Dashboard</a></li>
+              {% elif tmpl_user.role == 'dataman' %}
+                <li class="nav-item"><a class="nav-link" href="{{ url_for('dataman_dashboard') }}">Dashboard</a></li>
+                <li class="nav-item"><a class="nav-link" href="{{ url_for('index') }}">Add Sales</a></li>
+                <li class="nav-item"><a class="nav-link" href="{{ url_for('sales_list_page') }}">Sales Report</a></li>
               {% else %}
                 <li class="nav-item"><a class="nav-link" href="{{ url_for('index') }}">Sales</a></li>
                 <li class="nav-item"><a class="nav-link" href="{{ url_for('sales_list_page') }}">Sales Report</a></li>

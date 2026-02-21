@@ -1,37 +1,30 @@
 #!/usr/bin/env python3
 """
-Full patched app.py — consolidated final version.
+Final app.py — consolidated, non-blocking RTDB probe, dataman edit/finalize & correction support.
 
-Features:
-- RTDB-backed users and config (Firebase)
-- Session auth with roles: owner, dataman, van
-- Sales submission (individual)
-- Bank-entry flow (add/list/delete)
-- Expenses flow (add/list/delete)
-- submit_totals: compute total_sales from items or accept override,
-  snapshot bank entries and expenses into a version, mark consumed entries,
-  compute cash = total_sales - bank_total - expenses_total (unless override).
-- Role-aware reports view endpoint: /api/reports/view
-  - van: sees only their place and only their own sales / entries
-  - dataman: sees Store, Van 2, Van 3 breakdowns
-  - owner: sees all places with full detail
-- Owner day summary endpoint
-- PDF/CSV placeholders (reportlab optional)
-- Frontend templates referenced (index, dashboards, etc.)
+Highlights:
+- Non-blocking background root detection (app responds immediately).
+- Endpoints for creating/editing/finalizing report versions:
+  - POST /api/reports/<date>/<place>/submit_totals  (create version)
+  - POST /api/reports/<date>/<place>/correction     (create correction/version manually)
+  - GET  /api/reports/<date>/<place>                (list versions)
+  - PATCH /api/reports/<date>/<place>/versions/<id> (dataman edit)
+  - POST  /api/reports/<date>/<place>/versions/<id>/finalize (dataman finalize)
+- Dataman dashboard includes "Register Sales" link (so dataman can register store/shet/dawa).
+- Login/Setup behavior: /login always renders login page; /setup_user only creates initial user when none exist.
+- Reloader disabled on run to avoid double-initialization delays.
+- Bootstrap-based frontend is mobile-responsive already.
 
 Configure FIREBASE_DB_URL and FIREBASE_CREDENTIAL_PATH or place serviceAccountKey.json in project root.
 """
-from flask import Flask, render_template, request, jsonify, send_file, session, redirect, url_for
-import os, uuid, datetime, io, logging, re, csv
-from io import BytesIO
+from flask import Flask, render_template, request, jsonify, session, redirect, url_for
+import os, uuid, datetime, logging, re, threading
 from typing import Optional
 from werkzeug.security import generate_password_hash, check_password_hash
 
-# Optional PDF dependency
+# Optional PDF dependency (not used here)
 try:
-    from reportlab.lib.pagesizes import A4, landscape
-    from reportlab.pdfgen import canvas
-    from reportlab.lib.units import cm
+    import reportlab  # noqa: F401
     REPORTLAB_AVAILABLE = True
 except Exception:
     REPORTLAB_AVAILABLE = False
@@ -57,25 +50,35 @@ if not os.path.exists(CRED_PATH):
 cred = credentials.Certificate(CRED_PATH)
 firebase_admin.initialize_app(cred, {"databaseURL": FIREBASE_DB_URL})
 
-def detect_root_reference():
-    root = db.reference()
-    try:
-        data = root.get() or {}
-    except Exception:
-        return db.reference("Sales record")
-    if isinstance(data, dict):
-        for k, v in data.items():
-            if isinstance(v, dict) and ("config" in v or "price_config" in v or "sales" in v):
-                logging.info("Detected root candidate '%s'. Using it.", k)
-                return db.reference(k)
-    for c in ["Sales record", "Sales Record", "Sales_Record", "SalesRecord", "sales", "sales_record", "Sales"]:
-        if isinstance(data, dict) and c in data:
-            logging.info("Found candidate top-level '%s'. Using it.", c)
-            return db.reference(c)
-    logging.info("Defaulting to 'Sales record' as root.")
-    return db.reference("Sales record")
+# Start with a safe provisional root so app responds immediately.
+root_ref = db.reference("Sales Record")
+logging.info("Assigned provisional RTDB root: 'Sales Record' (background probe will try to locate actual root).")
 
-root_ref = detect_root_reference()
+def _detect_root_in_background():
+    """Background probe: switch root_ref if a better root key is found."""
+    try:
+        probe_root = db.reference()
+        try:
+            data = probe_root.get() or {}
+        except Exception as e:
+            logging.warning("Background root probe failed: %s", e)
+            return
+        if isinstance(data, dict):
+            for k, v in data.items():
+                if isinstance(v, dict) and ("config" in v or "price_config" in v or "sales" in v):
+                    logging.info("Background detection: found root candidate '%s' — switching root_ref.", k)
+                    globals()['root_ref'] = db.reference(k)
+                    return
+        for c in ("Sales record","Sales Record","Sales_Record","SalesRecord","sales","sales_record","Sales"):
+            if isinstance(data, dict) and c in data:
+                logging.info("Background detection: found top-level '%s' — switching root_ref.", c)
+                globals()['root_ref'] = db.reference(c)
+                return
+        logging.info("Background detection: no special root found; keeping 'Sales Record'.")
+    except Exception as e:
+        logging.exception("Background root detection crashed: %s", e)
+
+threading.Thread(target=_detect_root_in_background, daemon=True).start()
 
 # ---------- Static defaults ----------
 ITEMS = [
@@ -85,7 +88,7 @@ ITEMS = [
     "BEDELE Special RB Crt 20x50cl XLN ET LRM",
     "BEDELE Special RB Crt 24x33cl XLN ET LRM",
     "WALIA RB Crate 20x50cl XLN ET LRM",
-    "WALIA RB Crate 24x50cl XLN ET LRM",
+    "WALIA RB Crate 24x33cl XLN ET LRM",
     "SOFI RB CRATE 24X33CL XLN ET",
     "BUCKLER 0.0% RB CRATE 24X33CL XLN ET"
 ]
@@ -125,42 +128,39 @@ def safe_bank_key(bank_display: str) -> str:
     return key.lower() if key else uuid.uuid4().hex
 
 def normalize_place_name(p: Optional[str]) -> Optional[str]:
-    if not p:
-        return p
+    if not p: return p
     pn = str(p).strip()
-    low = pn.lower().replace("_"," ").replace("-"," ").strip()
-    if low in ("main store","mainstore","store"):
-        return "Store"
-    if low in ("van2","van 2","van_2","van-2"):
-        return "Van 2"
-    if low in ("van3","van 3","van_3","van-3"):
-        return "Van 3"
+    low = pn.lower().replace("_", " ").replace("-", " ").strip()
+    if low in ("main store","mainstore","store"): return "Store"
+    if low in ("van2","van 2","van_2","van-2"): return "Van 2"
+    if low in ("van3","van 3","van_3","van-3"): return "Van 3"
     return pn
 
 # ---------- Auth helpers ----------
 def users_ref():
     return root_ref.child("config").child("users")
+
 def get_user(username: str) -> Optional[dict]:
-    if not username:
-        return None
+    if not username: return None
     return users_ref().child(username).get()
+
 def set_user_password_hash(username: str, password_hash: str) -> None:
     try:
         users_ref().child(username).update({"password_hash": password_hash})
     except Exception:
         logging.exception("Failed to update password_hash for user %s", username)
+
 def create_user(username: str, password: str, role: str) -> dict:
     ph = generate_password_hash(password)
     obj = {"password_hash": ph, "role": role, "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat()}
     users_ref().child(username).set(obj)
     return obj
+
 def verify_user(username: str, password: str) -> bool:
     u = get_user(username)
-    if not u:
-        return False
+    if not u: return False
     ph = u.get("password_hash")
-    if ph is None:
-        return False
+    if ph is None: return False
     ph_str = str(ph)
     if "$" in ph_str:
         try:
@@ -169,6 +169,7 @@ def verify_user(username: str, password: str) -> bool:
             logging.exception("check_password_hash failed for user %s", username)
             return False
     if ph_str == password:
+        # migrate plaintext to hash
         try:
             new_hash = generate_password_hash(password)
             set_user_password_hash(username, new_hash)
@@ -177,13 +178,12 @@ def verify_user(username: str, password: str) -> bool:
             logging.exception("Failed to auto-migrate password for user %s", username)
         return True
     return False
+
 def current_user() -> Optional[dict]:
     uname = session.get("user")
-    if not uname:
-        return None
+    if not uname: return None
     u = get_user(uname)
-    if not u:
-        return None
+    if not u: return None
     return {"username": uname, "role": u.get("role"), "full_name": u.get("full_name"), "place": u.get("place")}
 
 def login_required(f):
@@ -197,8 +197,7 @@ def login_required(f):
 
 def role_required(roles):
     from functools import wraps
-    if isinstance(roles,str): allowed = {roles}
-    else: allowed = set(roles)
+    allowed = {roles} if isinstance(roles, str) else set(roles)
     def deco(f):
         @wraps(f)
         def inner(*args, **kwargs):
@@ -220,38 +219,43 @@ def inject_template_helpers():
 @app.route("/setup_user", methods=["GET","POST"])
 def setup_user_page():
     existing = users_ref().get() or {}
-    if existing: return redirect(url_for("login_page"))
-    if request.method=="POST":
+    if existing:
+        # If users already exist, hide setup form (do not expose to regular users)
+        # Still render a simple message linking to login.
+        return render_template("login.html", error="Initial setup already completed. Please sign in.")
+    if request.method == "POST":
         username = (request.form.get("username") or "").strip()
         password = (request.form.get("password") or "").strip()
         role = (request.form.get("role") or "owner").strip()
-        if not username or not password: return render_template("setup_user.html", error="username & password required")
-        create_user(username,password,role)
+        if not username or not password:
+            return render_template("setup_user.html", error="username & password required")
+        create_user(username, password, role)
         return redirect(url_for("login_page"))
     return render_template("setup_user.html")
 
 @app.route("/login", methods=["GET"])
 def login_page():
-    existing = users_ref().get() or {}
-    if not existing: return redirect(url_for("setup_user_page"))
+    # Always render login page. Setup is only allowed if no users exist.
     return render_template("login.html")
 
 @app.route("/login", methods=["POST"])
 def login_submit():
     username = (request.form.get("username") or "").strip()
     password = (request.form.get("password") or "").strip()
-    if not username or not password: return render_template("login.html", error="username & password required")
-    if not verify_user(username,password): return render_template("login.html", error="invalid credentials")
+    if not username or not password:
+        return render_template("login.html", error="username & password required")
+    if not verify_user(username, password):
+        return render_template("login.html", error="invalid credentials")
     session["user"] = username
     u = get_user(username) or {}
     role = u.get("role")
-    if role=="owner": return redirect(url_for("owner_dashboard"))
-    if role=="dataman": return redirect(url_for("dataman_dashboard"))
+    if role == "owner": return redirect(url_for("owner_dashboard"))
+    if role == "dataman": return redirect(url_for("dataman_dashboard"))
     return redirect(url_for("van_dashboard"))
 
 @app.route("/logout", methods=["GET"])
 def logout():
-    session.pop("user",None)
+    session.pop("user", None)
     return redirect(url_for("login_page"))
 
 # ---------- Dashboards ----------
@@ -265,7 +269,7 @@ def owner_dashboard():
 @login_required
 @role_required("dataman")
 def dataman_dashboard():
-    # Dataman needs access to sales entry too — show the Register Sales button in template
+    # Dataman can register sales for Store/Dawa/Shet -> link to 'index' (register sales)
     return render_template("dataman_dashboard.html", places=PLACES)
 
 @app.route("/van")
@@ -287,16 +291,10 @@ def translate_price_dict_from_db(db_price_dict):
             except Exception:
                 result[display] = None
         else:
-            if key in ITEMS:
-                try:
-                    result[key] = float(val) if val is not None and val != "" else None
-                except Exception:
-                    result[key] = None
-            else:
-                try:
-                    result[key] = float(val) if val is not None and val != "" else None
-                except Exception:
-                    result[key] = None
+            try:
+                result[key] = float(val) if val is not None and val != "" else None
+            except Exception:
+                result[key] = None
     for name in ITEMS:
         result.setdefault(name, None)
     return result
@@ -331,15 +329,11 @@ def api_get_config():
                 if not s: continue
                 sl = s.lower()
                 if user_full and user_full.lower() in sl:
-                    filtered.append(s)
-                    continue
+                    filtered.append(s); continue
                 if user_place and user_place.lower() in sl:
                     filtered.append(s)
             if not filtered:
-                if user_full:
-                    filtered = [user_full]
-                else:
-                    filtered = [u.get("username")]
+                filtered = [user_full] if user_full else [u.get("username")]
             salesmen_for_user = filtered
         elif role == "dataman":
             salesmen_for_user = ["Store"]
@@ -355,24 +349,23 @@ def normalize_sale_record(s: dict) -> dict:
     ns["place"] = normalize_place_name(ns.get("place"))
     items = ns.get("items") or {}
     norm_items = {}
-    for k,v in items.items():
-        if isinstance(v,dict) and v.get("display_name"):
-            display = v.get("display_name")
-            norm_items[display] = v
+    for k, v in items.items():
+        if isinstance(v, dict) and v.get("display_name"):
+            display = v.get("display_name"); norm_items[display] = v
         else:
-            display = DB_KEY_TO_DISPLAY.get(k,k)
-            if isinstance(v,dict): norm_items[display] = v
+            display = DB_KEY_TO_DISPLAY.get(k, k)
+            if isinstance(v, dict): norm_items[display] = v
             else:
                 try: crates = int(v or 0)
-                except Exception: crates=0
-                norm_items[display] = {"crates":crates}
+                except Exception: crates = 0
+                norm_items[display] = {"crates": crates}
     ns["items"] = norm_items
     payments = ns.get("payments") or {}
     banks = payments.get("banks") or {}
     norm_banks = {}
-    if isinstance(banks,dict):
-        for bk,bv in banks.items():
-            if isinstance(bv,dict) and ("amount" in bv or "display" in bv):
+    if isinstance(banks, dict):
+        for bk, bv in banks.items():
+            if isinstance(bv, dict) and ("amount" in bv or "display" in bv):
                 try: amt = float(bv.get("amount") or 0)
                 except Exception: amt = 0.0
                 norm_banks[safe_bank_key(bk)] = {"display": bv.get("display") or bk, "amount": amt}
@@ -382,9 +375,9 @@ def normalize_sale_record(s: dict) -> dict:
                 norm_banks[safe_bank_key(bk)] = {"display": bk, "amount": amt}
     ns["payments"] = {"cash": float(payments.get("cash") or 0), "banks": norm_banks}
     try: ns["crates_total"] = int(ns.get("crates_total") or 0)
-    except Exception: ns["crates_total"]=0
+    except Exception: ns["crates_total"] = 0
     try: ns["sales_total"] = float(ns.get("sales_total") or 0)
-    except Exception: ns["sales_total"]=0.0
+    except Exception: ns["sales_total"] = 0.0
     return ns
 
 # ---------- Sales endpoints ----------
@@ -393,8 +386,8 @@ def compute_sale_totals(items):
     for it in items:
         crates = int(it.get("crates",0) or 0)
         price = float(it.get("price",0) or 0)
-        crates_total += crates; sales_total += crates*price
-    return crates_total, round(sales_total,2)
+        crates_total += crates; sales_total += crates * price
+    return crates_total, round(sales_total, 2)
 
 def save_sale_to_db(sale: dict) -> None:
     date_str = sale["date"]
@@ -403,21 +396,21 @@ def save_sale_to_db(sale: dict) -> None:
 
 @app.route("/submit", methods=["POST"])
 @login_required
+# (snippet - replace the submit_sale function and the api_reports_view role==dataman block)
 def submit_sale():
     u = current_user()
-    if not u: return jsonify({"error":"auth required"}),401
+    if not u: return jsonify({"error":"auth required"}), 401
     data = request.json or {}
     salesman = (data.get("salesman") or u.get("username") or "").strip()
-    place = data.get("place"); place = normalize_place_name(place)
+    place = normalize_place_name(data.get("place"))
     items = data.get("items", [])
     payments = data.get("payments", {})
-    customer = (data.get("customer") or "").strip()  # kept optional support
-    invoice_total = float(data.get("invoice_total") or 0)  # kept optional support
-    if not salesman: return jsonify({"error":"salesman required"}),400
-    if not place: return jsonify({"error":"place required"}),400
-    if not isinstance(items,list) or not items: return jsonify({"error":"items required"}),400
+    customer = (data.get("customer") or "").strip()
+    invoice_total = float(data.get("invoice_total") or 0)
+    if not salesman: return jsonify({"error":"salesman required"}), 400
+    if not place: return jsonify({"error":"place required"}), 400
+    if not isinstance(items, list) or not items: return jsonify({"error":"items required"}), 400
 
-    # enforce van restrictions
     if u.get("role") == "van":
         uname = u.get("username") or ""
         full = u.get("full_name") or ""
@@ -427,22 +420,54 @@ def submit_sale():
         if assigned != place:
             return jsonify({"error":"van users may only submit for their assigned place"}), 403
 
-    normalized_items=[]
+    # ----- fetch price map for this place (server-side authoritative) -----
+    cfg = root_ref.child("config").get() or {}
+    price_cfg_db = cfg.get("price_config") or {}
+    def get_price_map_for_place(place_name):
+        db_place = "Main Store" if place_name == "Store" else place_name
+        db_prices = price_cfg_db.get(db_place) or {}
+        return translate_price_dict_from_db(db_prices)
+    place_price_map = get_price_map_for_place(place)
+    store_price_map = get_price_map_for_place("Store")
+
+    # If place is Store or Van 2/Van 3, server will use configured prices rather than client-supplied ones.
+    editable_price_places = {"Dawa", "Shet"}  # only these allow client-provided prices
+    normalized_items = []
     for it in items:
-        name = it.get("name"); crates = int(it.get("crates") or 0); provided_price = it.get("price")
-        if name not in ITEMS: return jsonify({"error":f"unknown item {name}"}),400
-        if crates<0: return jsonify({"error":f"invalid crates for {name}"}),400
-        price = float(provided_price or 0)
-        normalized_items.append({"name":name,"crates":crates,"price":price})
+        name = it.get("name")
+        try:
+            crates = int(it.get("crates") or 0)
+        except Exception:
+            return jsonify({"error": f"invalid crates for {name}"}), 400
+        provided_price = it.get("price")
+        if name not in ITEMS:
+            return jsonify({"error":f"unknown item {name}"}), 400
+        if crates < 0:
+            return jsonify({"error":f"invalid crates for {name}"}), 400
+
+        # determine final price to store:
+        if place in editable_price_places:
+            price = float(provided_price or 0)
+        else:
+            # use place price if present, else fallback to store price, else 0
+            p = None
+            if isinstance(place_price_map, dict):
+                p = place_price_map.get(name)
+            if p is None and isinstance(store_price_map, dict):
+                p = store_price_map.get(name)
+            price = float(p or 0)
+
+        normalized_items.append({"name": name, "crates": crates, "price": price})
+
     crates_total, sales_total = compute_sale_totals(normalized_items)
     cash_total = float((payments.get("cash") or 0) or 0)
-    bank_dict = payments.get("banks",{}) or {}
-    banks_safe={}
-    for bk,bv in bank_dict.items():
-        try: amt=float(bv or 0)
-        except: amt=0.0
+    bank_dict = payments.get("banks", {}) or {}
+    banks_safe = {}
+    for bk, bv in bank_dict.items():
+        try: amt = float(bv or 0)
+        except: amt = 0.0
         banks_safe[safe_bank_key(bk)] = {"display": bk, "amount": amt}
-    items_for_db={}
+    items_for_db = {}
     for it in normalized_items:
         dbk = make_safe_key(it["name"])
         items_for_db[dbk] = {"display_name": it["name"], "crates": int(it["crates"]), "price": float(it["price"])}
@@ -456,7 +481,7 @@ def submit_sale():
         "crates_total": crates_total,
         "sales_total": sales_total,
         "payments": {"cash": cash_total, "banks": banks_safe},
-        "paid_total": cash_total + sum(v.get("amount",0) for v in banks_safe.values()),
+        "paid_total": cash_total + sum(v.get("amount", 0) for v in banks_safe.values()),
         "invoice_total": invoice_total,
         "difference": round((cash_total + sum(v.get("amount",0) for v in banks_safe.values())) - sales_total, 2),
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -465,24 +490,24 @@ def submit_sale():
         save_sale_to_db(sale)
     except Exception as e:
         logging.exception("Error saving sale")
-        return jsonify({"error":"failed to save sale","details":str(e)}),500
+        return jsonify({"error":"failed to save sale","details":str(e)}), 500
     return jsonify({"status":"ok","sale":sale})
 
 @app.route("/api/get_sales")
 def api_get_sales():
     start = request.args.get("start"); end = request.args.get("end")
-    if not start or not end: return jsonify({"error":"start and end required"}),400
+    if not start or not end: return jsonify({"error":"start and end required"}), 400
     try:
-        start_date = datetime.datetime.strptime(start,"%Y-%m-%d").date()
-        end_date = datetime.datetime.strptime(end,"%Y-%m-%d").date()
+        start_date = datetime.datetime.strptime(start, "%Y-%m-%d").date()
+        end_date = datetime.datetime.strptime(end, "%Y-%m-%d").date()
     except Exception:
-        return jsonify({"error":"bad date format"}),400
-    result={}; cur=start_date
-    while cur<=end_date:
+        return jsonify({"error":"bad date format"}), 400
+    result = {}; cur = start_date
+    while cur <= end_date:
         dstr = cur.strftime("%Y-%m-%d")
-        day_sales=root_ref.child("sales").child(dstr).get() or {}
-        normalized=[]
-        for sid,s in day_sales.items():
+        day_sales = root_ref.child("sales").child(dstr).get() or {}
+        normalized = []
+        for sid, s in (day_sales.items()):
             try: ns = normalize_sale_record(dict(s))
             except: ns = s
             normalized.append(ns)
@@ -493,32 +518,32 @@ def api_get_sales():
 @app.route("/api/get_bank_payments")
 def api_get_bank_payments():
     start = request.args.get("start"); end = request.args.get("end")
-    if not start or not end: return jsonify({"error":"start and end required"}),400
+    if not start or not end: return jsonify({"error":"start and end required"}), 400
     try:
-        start_date = datetime.datetime.strptime(start,"%Y-%m-%d").date()
-        end_date = datetime.datetime.strptime(end,"%Y-%m-%d").date()
+        start_date = datetime.datetime.strptime(start, "%Y-%m-%d").date()
+        end_date = datetime.datetime.strptime(end, "%Y-%m-%d").date()
     except Exception:
-        return jsonify({"error":"bad date format"}),400
-    payments=[]; cur=start_date
-    while cur<=end_date:
-        dstr=cur.strftime("%Y-%m-%d")
-        sales=root_ref.child("sales").child(dstr).get() or {}
-        for sid,s in sales.items():
+        return jsonify({"error":"bad date format"}), 400
+    payments = []; cur = start_date
+    while cur <= end_date:
+        dstr = cur.strftime("%Y-%m-%d")
+        sales = root_ref.child("sales").child(dstr).get() or {}
+        for sid, s in sales.items():
             payments_obj = s.get("payments") or {}
-            banks = payments_obj.get("banks",{}) or {}
-            for _,v in banks.items():
-                if isinstance(v,dict):
+            banks = payments_obj.get("banks", {}) or {}
+            for _, v in banks.items():
+                if isinstance(v, dict):
                     display = v.get("display") or ""
                     amt = float(v.get("amount") or 0)
                     if amt:
-                        payments.append({"date": s.get("date"), "place": normalize_place_name(s.get("place")), "bank":display, "amount":amt, "customer": s.get("customer",""), "salesman": s.get("salesman"), "id": s.get("id")})
+                        payments.append({"date": s.get("date"), "place": normalize_place_name(s.get("place")), "bank": display, "amount": amt, "customer": s.get("customer", ""), "salesman": s.get("salesman"), "id": s.get("id")})
             if not banks:
                 legacy = payments_obj.get("banks_display") or {}
-                for b,amt in legacy.items():
+                for b, amt in legacy.items():
                     if float(amt or 0) != 0:
                         payments.append({"date": s.get("date"), "place": normalize_place_name(s.get("place")), "bank": b, "amount": float(amt or 0), "customer": s.get("customer",""), "salesman": s.get("salesman"), "id": s.get("id")})
         cur += datetime.timedelta(days=1)
-    payments.sort(key=lambda x:(x["date"], x["amount"]), reverse=False)
+    payments.sort(key=lambda x: (x["date"], x["amount"]), reverse=False)
     return jsonify({"payments": payments})
 
 @app.route("/api/my_sales")
@@ -528,33 +553,35 @@ def api_my_sales():
     u = current_user() or {}
     date = request.args.get("date") or datetime.date.today().strftime("%Y-%m-%d")
     sales_for_day = root_ref.child("sales").child(date).get() or {}
-    result=[]; username = (u.get("username") or "").strip()
+    result = []; username = (u.get("username") or "").strip()
     user_record = get_user(username) or {}
     full_name = (user_record.get("full_name") or "").strip()
     uname_l = username.lower(); full_l = full_name.lower()
     cfg_salesmen = (root_ref.child("config").child("salesmen").get() or []) or []
     cfg_salesmen_l = [str(x).lower() for x in cfg_salesmen if x]
-    for sid,s in sales_for_day.items():
+    for sid, s in sales_for_day.items():
         try: ns = normalize_sale_record(dict(s))
         except: ns = s
         if u.get("role") in ("owner","dataman"):
             result.append(ns); continue
         salesman_field = (ns.get("salesman") or "").strip(); sf_l = salesman_field.lower()
-        matched=False
-        if uname_l and uname_l in sf_l: matched=True
-        if not matched and full_l and full_l in sf_l: matched=True
+        matched = False
+        if uname_l and uname_l in sf_l: matched = True
+        if not matched and full_l and full_l in sf_l: matched = True
         if not matched:
             for entry in cfg_salesmen_l:
                 if uname_l and uname_l in entry and entry in sf_l:
-                    matched=True; break
+                    matched = True; break
         if matched: result.append(ns)
     return jsonify({"date": date, "sales": result})
 
 # ---------- Versioned reports base ----------
 def reports_base_ref():
     return root_ref.child("daily_reports")
+
 def make_version_id():
     return uuid.uuid4().hex
+
 def save_report_version(date: str, place: str, version_obj: dict):
     ref = reports_base_ref().child(date).child(place).child("versions").child(version_obj["id"])
     ref.set(version_obj)
@@ -573,13 +600,10 @@ def add_bank_entry(date, place):
         return jsonify({"error": "invalid amount"}), 400
     if not bank or amount <= 0:
         return jsonify({"error": "bank and positive amount required"}), 400
-
     place = normalize_place_name(place)
     if user.get("role") == "van":
-        user_place = (user.get("place") or "").strip()
-        if normalize_place_name(user_place) != place:
+        if normalize_place_name(user.get("place")) != place:
             return jsonify({"error": "van users may only add entries for their assigned place"}), 403
-
     entry_id = uuid.uuid4().hex
     entry_obj = {
         "id": entry_id,
@@ -698,25 +722,25 @@ def delete_expense(date, place, exp_id):
         return jsonify({"error": "failed to delete", "details": str(e)}), 500
     return jsonify({"status": "ok"})
 
-# ---------- submit_totals (patched: include expenses) ----------
+# ---------- submit_totals (create version) ----------
 @app.route("/api/reports/<date>/<place>/submit_totals", methods=["POST"])
 @login_required
 @role_required(["van","dataman","owner"])
 def submit_totals(date, place):
     """
-    Submit totals: compute total_sales from items (if provided) otherwise accept total_sales,
-    snapshot bank_entries and expenses into the version, mark them consumed_by.
-    cash_total = total_sales - bank_total - expenses_total unless cash_total override provided.
+    Snapshot current bank_entries & expenses into a version.
+    Dataman can later edit that version (PATCH) and finalize (POST finalize).
     """
     user = current_user()
     place = normalize_place_name(place)
     if user.get("role") == "van" and normalize_place_name(user.get("place")) != place:
-        return jsonify({"error": "van users may only submit for their assigned place"}), 403
+        return jsonify({"error":"van users may only submit for their assigned place"}), 403
 
     data = request.json or {}
     items = data.get("items") or {}
     note = data.get("note", "")
 
+    # If items provided, try compute total_sales using price config; otherwise accept total_sales override
     computed_total_sales = None
     if isinstance(items, dict) and items:
         cfg = root_ref.child("config").get() or {}
@@ -737,67 +761,52 @@ def submit_totals(date, place):
             price = None
             if isinstance(place_price_map, dict):
                 p = place_price_map.get(display_name)
-                if p is not None:
-                    price = p
+                if p is not None: price = p
             if price is None and isinstance(store_price_map, dict):
                 p = store_price_map.get(display_name)
-                if p is not None:
-                    price = p
+                if p is not None: price = p
             if price is None:
                 missing_prices.append(display_name)
             else:
                 total += crates_i * float(price)
         if missing_prices:
-            return jsonify({"error": "missing prices for items", "missing": missing_prices}), 400
+            return jsonify({"error":"missing prices for items", "missing": missing_prices}), 400
         computed_total_sales = round(total, 2)
 
     if computed_total_sales is None:
         try:
             total_sales = float(data.get("total_sales") or 0)
         except Exception:
-            return jsonify({"error": "invalid total_sales"}), 400
+            return jsonify({"error":"invalid total_sales"}), 400
     else:
         total_sales = computed_total_sales
 
-    # bank entries
+    # snapshot bank entries & expenses
     be_node = reports_base_ref().child(date).child(place).child("bank_entries")
     entries_map = be_node.get() or {}
     bank_entries_list = list(entries_map.values())
-    bank_total = 0.0
-    for e in bank_entries_list:
-        try: bank_total += float(e.get("amount") or 0)
-        except Exception: pass
-    bank_total = round(bank_total, 2)
+    bank_total = round(sum(float(e.get("amount") or 0) for e in bank_entries_list), 2)
 
-    # expenses
     exp_node = reports_base_ref().child(date).child(place).child("expenses")
     exps_map = exp_node.get() or {}
     expenses_list = list(exps_map.values())
-    expenses_total = 0.0
-    for ex in expenses_list:
-        try: expenses_total += float(ex.get("amount") or 0)
-        except Exception: pass
-    expenses_total = round(expenses_total, 2)
+    expenses_total = round(sum(float(e.get("amount") or 0) for e in expenses_list), 2)
 
     # cash override optional
     cash_override = data.get("cash_total")
     if cash_override is not None:
-        try:
-            cash_total = round(float(cash_override), 2)
-        except Exception:
-            return jsonify({"error": "invalid cash_total override"}), 400
+        try: cash_total = round(float(cash_override), 2)
+        except Exception: return jsonify({"error":"invalid cash_total override"}), 400
     else:
         cash_total = round(total_sales - bank_total - expenses_total, 2)
 
-    # convert items to safe DB keys
+    # build items_for_db
     items_for_db = {}
     crates_total = 0
     if isinstance(items, dict) and items:
         for display_name, crates in items.items():
-            try:
-                crates_i = int(crates or 0)
-            except Exception:
-                crates_i = 0
+            try: crates_i = int(crates or 0)
+            except Exception: crates_i = 0
             dbk = make_safe_key(display_name)
             items_for_db[dbk] = {"display_name": display_name, "crates": crates_i}
             crates_total += crates_i
@@ -807,7 +816,7 @@ def submit_totals(date, place):
         "id": version_id,
         "created_by": user["username"],
         "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        "prev_version": "",
+        "prev_version": data.get("prev_version", ""),
         "status": "pending_verification",
         "bank_entries": bank_entries_list,
         "bank_total": bank_total,
@@ -823,29 +832,282 @@ def submit_totals(date, place):
     try:
         versions_node = reports_base_ref().child(date).child(place).child("versions")
         versions_node.child(version_id).set(version_obj)
-        # mark bank entries consumed
+        # mark bank entries/expenses consumed by this version
         for eid in entries_map.keys():
             try: be_node.child(eid).update({"consumed_by": version_id})
             except Exception: logging.exception("Failed to mark bank entry consumed: %s", eid)
-        # mark expenses consumed
         for exid in exps_map.keys():
             try: exp_node.child(exid).update({"consumed_by": version_id})
             except Exception: logging.exception("Failed to mark expense consumed: %s", exid)
     except Exception as e:
         logging.exception("Failed to save report version")
-        return jsonify({"error": "failed to save version", "details": str(e)}), 500
+        return jsonify({"error":"failed to save version", "details": str(e)}), 500
 
-    return jsonify({"status": "ok", "version": version_obj, "computed_total_sales": computed_total_sales})
+    return jsonify({"status":"ok", "version": version_obj, "computed_total_sales": computed_total_sales})
 
+# ---------- Create correction (dataman) ----------
+@app.route("/api/reports/<date>/<place>/correction", methods=["POST"])
+@login_required
+@role_required("dataman")
+def create_correction(date, place):
+    """
+    Dataman can create a correction version — provide items map or total_sales, optional bank_entries/expenses lists.
+    Body example:
+    {
+      "items": {"HARAR ...": 10, ...},        # optional
+      "total_sales": 40520,                   # optional if items present or used directly
+      "cash_total": 370,                      # optional
+      "bank_entries": [{"bank":"Awash","amount":100}, ...],  # optional
+      "expenses": [{"description":"fuel","amount":50}, ...], # optional
+      "note": "correction after recount",
+      "prev_version": ""                       # optional
+    }
+    """
+    user = current_user()
+    place = normalize_place_name(place)
+    data = request.json or {}
+    items = data.get("items") or {}
+    note = data.get("note", "")
+    bank_entries = data.get("bank_entries") or []
+    expenses = data.get("expenses") or []
+
+    # compute total_sales from items if provided
+    computed_total_sales = None
+    if isinstance(items, dict) and items:
+        cfg = root_ref.child("config").get() or {}
+        price_cfg_db = cfg.get("price_config") or {}
+        def get_price_map_for_place(place_name):
+            db_place = "Main Store" if place_name == "Store" else place_name
+            db_prices = price_cfg_db.get(db_place) or {}
+            return translate_price_dict_from_db(db_prices)
+        place_price_map = get_price_map_for_place(place)
+        store_price_map = get_price_map_for_place("Store")
+        total = 0.0
+        missing = []
+        for display_name, crates in items.items():
+            try: crates_i = int(crates or 0)
+            except: return jsonify({"error": f"invalid crates for {display_name}"}), 400
+            price = None
+            if isinstance(place_price_map, dict):
+                p = place_price_map.get(display_name)
+                if p is not None: price = p
+            if price is None and isinstance(store_price_map, dict):
+                p = store_price_map.get(display_name)
+                if p is not None: price = p
+            if price is None:
+                missing.append(display_name)
+            else:
+                total += crates_i * float(price)
+        if missing:
+            computed_total_sales = None
+        else:
+            computed_total_sales = round(total, 2)
+
+    if computed_total_sales is None:
+        try:
+            total_sales = float(data.get("total_sales") or 0)
+        except Exception:
+            return jsonify({"error":"invalid total_sales"}), 400
+    else:
+        total_sales = computed_total_sales
+
+    # totals for bank / expenses (sum arrays if provided)
+    bank_total = round(sum(float(b.get("amount") or 0) for b in bank_entries), 2)
+    expenses_total = round(sum(float(e.get("amount") or 0) for e in expenses), 2)
+
+    cash_override = data.get("cash_total")
+    if cash_override is not None:
+        try: cash_total = round(float(cash_override), 2)
+        except Exception: return jsonify({"error":"invalid cash_total override"}), 400
+    else:
+        cash_total = round(total_sales - bank_total - expenses_total, 2)
+
+    # items_for_db
+    items_for_db = {}
+    crates_total = 0
+    if isinstance(items, dict) and items:
+        for display_name, crates in items.items():
+            try: crates_i = int(crates or 0)
+            except: crates_i = 0
+            dbk = make_safe_key(display_name)
+            items_for_db[dbk] = {"display_name": display_name, "crates": crates_i}
+            crates_total += crates_i
+
+    version_id = make_version_id()
+    version_obj = {
+        "id": version_id,
+        "created_by": user["username"],
+        "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "prev_version": data.get("prev_version", ""),
+        "status": "pending_verification",
+        "bank_entries": bank_entries,
+        "bank_total": bank_total,
+        "expenses": expenses,
+        "expenses_total": expenses_total,
+        "cash_total": cash_total,
+        "items": items_for_db,
+        "crates_total": crates_total,
+        "total_sales": round(total_sales, 2),
+        "note": note
+    }
+
+    try:
+        reports_base_ref().child(date).child(place).child("versions").child(version_id).set(version_obj)
+    except Exception as e:
+        logging.exception("Failed to save correction version")
+        return jsonify({"error":"failed to save correction", "details": str(e)}), 500
+
+    return jsonify({"status":"ok", "version": version_obj})
+
+# ---------- List versions for a date/place ----------
+@app.route("/api/reports/<date>/<place>", methods=["GET"])
+@login_required
+def list_versions_and_summary(date, place):
+    """
+    Returns: { versions: [...], summary: {...} }
+    Versions is a list (possibly empty) of version objects sorted by created_at desc.
+    Summary is a computed place/day summary (uses compute_place_day_summary).
+    """
+    place = normalize_place_name(place)
+    versions_map = reports_base_ref().child(date).child(place).child("versions").get() or {}
+    versions = list(versions_map.values()) if isinstance(versions_map, dict) else (versions_map or [])
+    # sort descending by created_at
+    try:
+        versions = sorted(versions, key=lambda x: x.get("created_at",""), reverse=True)
+    except Exception:
+        pass
+    summary = compute_place_day_summary(date, place)
+    return jsonify({"versions": versions, "summary": summary})
+
+# ---------- Edit & Finalize endpoints (dataman) ----------
+@app.route("/api/reports/<date>/<place>/versions/<version_id>", methods=["PATCH"])
+@login_required
+@role_required("dataman")
+def edit_report_version(date, place, version_id):
+    user = current_user()
+    place = normalize_place_name(place)
+    version_ref = reports_base_ref().child(date).child(place).child("versions").child(version_id)
+    version = version_ref.get()
+    if not version:
+        return jsonify({"error":"version not found"}), 404
+    if str(version.get("status") or "").lower() == "finalized":
+        return jsonify({"error":"version already finalized and cannot be edited"}), 400
+
+    data = request.json or {}
+    items_in = data.get("items")
+    note = (data.get("note") or "").strip()
+    total_sales_override = data.get("total_sales", None)
+    cash_override = data.get("cash_total", None)
+
+    items_for_db = version.get("items") or {}
+    crates_total = version.get("crates_total", 0)
+    computed_total_sales = None
+
+    if isinstance(items_in, dict) and items_in:
+        new_items = {}
+        crates_sum = 0
+        for display_name, crates in items_in.items():
+            try: crates_i = int(crates or 0)
+            except: crates_i = 0
+            dbk = make_safe_key(display_name)
+            new_items[dbk] = {"display_name": display_name, "crates": crates_i}
+            crates_sum += crates_i
+        items_for_db = new_items
+        crates_total = crates_sum
+
+        # try compute total_sales via price_config; if missing prices, skip computed_total_sales
+        cfg = root_ref.child("config").get() or {}
+        price_cfg_db = cfg.get("price_config") or {}
+        def get_price_map_for_place(place_name):
+            db_place = "Main Store" if place_name == "Store" else place_name
+            db_prices = price_cfg_db.get(db_place) or {}
+            return translate_price_dict_from_db(db_prices)
+        place_price_map = get_price_map_for_place(place)
+        store_price_map = get_price_map_for_place("Store")
+        total_calc = 0.0; missing = []
+        for dbk, it in items_for_db.items():
+            display = it.get("display_name") or DB_KEY_TO_DISPLAY.get(dbk, dbk)
+            crates_i = int(it.get("crates") or 0)
+            price = None
+            if isinstance(place_price_map, dict):
+                p = place_price_map.get(display)
+                if p is not None: price = p
+            if price is None and isinstance(store_price_map, dict):
+                p = store_price_map.get(display)
+                if p is not None: price = p
+            if price is None:
+                missing.append(display)
+            else:
+                total_calc += crates_i * float(price)
+        if not missing:
+            computed_total_sales = round(total_calc, 2)
+
+    # resolve total_sales
+    if computed_total_sales is not None:
+        total_sales_final = computed_total_sales
+    elif total_sales_override is not None:
+        try: total_sales_final = round(float(total_sales_override), 2)
+        except Exception: return jsonify({"error":"invalid total_sales override"}), 400
+    else:
+        total_sales_final = float(version.get("total_sales") or 0)
+
+    # cash resolution
+    if cash_override is not None:
+        try: cash_total_final = round(float(cash_override), 2)
+        except Exception: return jsonify({"error":"invalid cash_total override"}), 400
+    else:
+        bank_total = float(version.get("bank_total") or 0)
+        expenses_total = float(version.get("expenses_total") or 0)
+        cash_total_final = round(total_sales_final - bank_total - expenses_total, 2)
+
+    patch = {
+        "items": items_for_db,
+        "crates_total": int(crates_total or 0),
+        "total_sales": float(total_sales_final),
+        "cash_total": float(cash_total_final),
+        "note": note or version.get("note",""),
+        "updated_by": user["username"],
+        "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat()
+    }
+
+    try:
+        version_ref.update(patch)
+    except Exception as e:
+        logging.exception("Failed to update version")
+        return jsonify({"error":"failed to update version", "details": str(e)}), 500
+
+    updated = version_ref.get()
+    return jsonify({"status":"ok", "version": updated})
+
+@app.route("/api/reports/<date>/<place>/versions/<version_id>/finalize", methods=["POST"])
+@login_required
+@role_required("dataman")
+def dataman_finalize_version(date, place, version_id):
+    user = current_user()
+    place = normalize_place_name(place)
+    version_ref = reports_base_ref().child(date).child(place).child("versions").child(version_id)
+    version = version_ref.get()
+    if not version:
+        return jsonify({"error":"version not found"}), 404
+    if str(version.get("status") or "").lower() == "finalized":
+        return jsonify({"error":"version already finalized"}), 400
+    try:
+        version_ref.update({
+            "status": "finalized",
+            "finalized_by": user["username"],
+            "finalized_at": datetime.datetime.now(datetime.timezone.utc).isoformat()
+        })
+        return jsonify({"status":"ok", "version_id": version_id})
+    except Exception as e:
+        logging.exception("Failed to finalize version")
+        return jsonify({"error":"failed to finalize", "details": str(e)}), 500
+
+# ---------- Helper: compute place/day summary ----------
 # ---------- Helper: compute place/day summary (used by role-aware view) ----------
 def _to_list(maybe):
-    """Convert RTDB map/object to list of values if necessary."""
-    if maybe is None:
-        return []
-    if isinstance(maybe, list):
-        return maybe
-    if isinstance(maybe, dict):
-        return list(maybe.values())
+    if maybe is None: return []
+    if isinstance(maybe, list): return maybe
+    if isinstance(maybe, dict): return list(maybe.values())
     return [maybe]
 
 def compute_place_day_summary(date_str: str, place: str, *, for_role: str = None, username: str = None):
@@ -865,8 +1127,8 @@ def compute_place_day_summary(date_str: str, place: str, *, for_role: str = None
             # defensive fallback: pick any
             latest = list(versions.values())[0]
         # normalize bank_entries & expenses from the version (versions often contain snapshot)
-        ver_bank_entries = _to_list(latest.get("bank_entries") or latest.get("bank_entries") or [])
-        ver_expenses = _to_list(latest.get("expenses") or latest.get("expenses") or [])
+        ver_bank_entries = _to_list(latest.get("bank_entries") or [])
+        ver_expenses = _to_list(latest.get("expenses") or [])
         # compute bank_total/expenses_total from the version if present, else fall back to fields
         try:
             ver_bank_total = float(latest.get("bank_total")) if latest.get("bank_total") is not None else round(sum(float(b.get("amount") or 0) for b in ver_bank_entries), 2)
@@ -991,28 +1253,23 @@ def compute_place_day_summary(date_str: str, place: str, *, for_role: str = None
 @login_required
 def api_reports_view():
     u = current_user()
-    if not u:
-        return jsonify({"error": "auth required"}), 401
-    role = u.get("role")
-    username = u.get("username") or ""
-    start = request.args.get("start")
-    end = request.args.get("end")
-    if not start or not end:
-        return jsonify({"error": "start and end required"}), 400
+    if not u: return jsonify({"error":"auth required"}), 401
+    role = u.get("role"); username = u.get("username") or ""
+    start = request.args.get("start"); end = request.args.get("end")
+    if not start or not end: return jsonify({"error":"start and end required"}), 400
     try:
         start_date = datetime.datetime.strptime(start, "%Y-%m-%d").date()
         end_date = datetime.datetime.strptime(end, "%Y-%m-%d").date()
     except Exception:
-        return jsonify({"error": "bad date format"}), 400
+        return jsonify({"error":"bad date format"}), 400
 
     if role == "van":
         user_db = get_user(username) or {}
         assigned = normalize_place_name(user_db.get("place") or u.get("place") or "")
-        if not assigned:
-            return jsonify({"error": "van user has no assigned place"}), 400
+        if not assigned: return jsonify({"error":"van user has no assigned place"}), 400
         places_to_show = [assigned]
     elif role == "dataman":
-        places_to_show = ["Store", "Van 2", "Van 3"]
+        places_to_show = ["Store", "Van 2", "Van 3", "Dawa", "Shet"]
     else:
         param_places = request.args.get("places")
         if param_places:
@@ -1040,40 +1297,34 @@ def api_reports_view():
 @role_required("owner")
 def api_owner_day_summary():
     date = request.args.get("date") or datetime.datetime.now(datetime.timezone.utc).date().isoformat()
-    result = {}
-    bank_details = []
+    result = {}; bank_details = []
     for place in PLACES:
         sales = root_ref.child("sales").child(date).get() or {}
-        bank_total = 0.0
-        raw_bank_items = []
-        sales_sum_from_raw = 0.0
-        for sid,s in (sales.items()):
+        bank_total = 0.0; raw_bank_items = []; sales_sum_from_raw = 0.0
+        for sid, s in (sales.items()):
             sale_place = normalize_place_name(s.get("place"))
-            if sale_place != place:
-                continue
+            if sale_place != place: continue
             try: sales_sum_from_raw += float(s.get("sales_total") or 0)
             except: pass
             payments = s.get("payments") or {}
             banks = payments.get("banks") or {}
             if banks:
-                for bk,bv in banks.items():
-                    if isinstance(bv,dict):
+                for bk, bv in banks.items():
+                    if isinstance(bv, dict):
                         display = bv.get("display") or bk
                         amt = float(bv.get("amount") or 0)
                         if amt:
                             bank_total += amt
                             raw_bank_items.append({"date": s.get("date"), "place": sale_place, "bank": display, "amount": amt, "customer": s.get("customer",""), "salesman": s.get("salesman"), "sale_id": s.get("id")})
                     else:
-                        try:
-                            amt = float(bv or 0)
-                        except:
-                            amt = 0.0
+                        try: amt = float(bv or 0)
+                        except: amt = 0.0
                         if amt:
                             bank_total += amt
                             raw_bank_items.append({"date": s.get("date"), "place": sale_place, "bank": bk, "amount": amt, "customer": s.get("customer",""), "salesman": s.get("salesman"), "sale_id": s.get("id")})
             else:
                 legacy = payments.get("banks_display") or {}
-                for b,amt in legacy.items():
+                for b, amt in legacy.items():
                     try: a = float(amt or 0)
                     except: a = 0.0
                     if a:
@@ -1085,10 +1336,10 @@ def api_owner_day_summary():
             reported_total = float(latest.get("total_sales") or 0)
             reported_source = "version"
         else:
-            reported_total = round(sales_sum_from_raw,2)
+            reported_total = round(sales_sum_from_raw, 2)
             reported_source = "raw_sales"
-        cash_total = round(reported_total - bank_total,2)
-        result[place] = {"date": date, "reported_total": round(reported_total,2), "bank_total": round(bank_total,2), "cash_total": cash_total, "reported_source": reported_source}
+        cash_total = round(reported_total - bank_total, 2)
+        result[place] = {"date": date, "reported_total": round(reported_total, 2), "bank_total": round(bank_total, 2), "cash_total": cash_total, "reported_source": reported_source}
         bank_details.extend(raw_bank_items)
     bank_details = sorted(bank_details, key=lambda x: (x["place"], -x["amount"]))
     return jsonify({"date": date, "places": result, "bank_details": bank_details})
@@ -1101,12 +1352,7 @@ def report_pdf():
     if not REPORTLAB_AVAILABLE:
         return ("PDF generation disabled: install reportlab", 503)
     start = request.args.get("start"); end = request.args.get("end")
-    if not start or not end: return "start and end required (YYYY-MM-DD)",400
-    try:
-        start_date = datetime.datetime.strptime(start,"%Y-%m-%d").date()
-        end_date = datetime.datetime.strptime(end,"%Y-%m-%d").date()
-    except Exception:
-        return "bad date format",400
+    if not start or not end: return "start and end required (YYYY-MM-DD)", 400
     return ("PDF generation not shown here", 200)
 
 @app.route("/report/csv")
@@ -1116,13 +1362,20 @@ def report_csv():
     return ("CSV endpoint present - use prior implementation", 200)
 
 # ---------- Front-end routes ----------
+# Replace the index() route at the bottom of your app.py with this function
+
+# ---------- Front-end routes ----------
 @app.route("/")
 def index():
     u = current_user()
     if u:
-        if u.get("role") == "owner": return redirect(url_for("owner_dashboard"))
-        if u.get("role") == "dataman": return redirect(url_for("dataman_dashboard"))
-        return render_template("index.html", items=ITEMS, banks=BANKS, places=PLACES)
+        # owner -> owner dashboard
+        if u.get("role") == "owner":
+            return redirect(url_for("owner_dashboard"))
+        # dataman and van should be able to register sales (index is sales registration form)
+        if u.get("role") in ("dataman", "van"):
+            return render_template("index.html", items=ITEMS, banks=BANKS, places=PLACES)
+    # unauthenticated users and others see sales entry as a starting page
     return render_template("index.html", items=ITEMS, banks=BANKS, places=PLACES)
 
 @app.route("/sales")
@@ -1131,4 +1384,5 @@ def sales_list_page():
     return render_template("sales_list.html", today=today, places=PLACES)
 
 if __name__ == "__main__":
-    app.run(debug=True, port=5000)
+    # Disable reloader to avoid double initialization and extra DB probes during development
+    app.run(debug=True, port=5000, use_reloader=False)

@@ -60,7 +60,7 @@ document.addEventListener("DOMContentLoaded", function(){
     setTimeout(()=> { if (messageEl) messageEl.style.display = "none"; }, 5000);
   }
 
-  async function loadConfig(){
+    async function loadConfig(){
     try {
       const res = await fetch("/api/config");
       if (!res.ok) throw new Error("Failed to load config");
@@ -68,11 +68,10 @@ document.addEventListener("DOMContentLoaded", function(){
       PRICE_CONFIG = data.price_config || {};
       SALES_MEN = data.salesmen || [];
       populateSalesmen();
-      if (SALES_MEN.length === 1 && salesmanSelect){
-        salesmanSelect.value = SALES_MEN[0];
-        salesmanSelect.disabled = true;
-      }
+
+      // Role-specific adjustments
       if (CU && CU.role === "van"){
+        // van behavior: preselect salesman and place and lock them
         if (SALES_MEN.length){
           const found = SALES_MEN.find(x => x.toLowerCase().includes((CU.username||"").toLowerCase()));
           if (found) salesmanSelect.value = found;
@@ -85,11 +84,35 @@ document.addEventListener("DOMContentLoaded", function(){
           placeEl.disabled = true;
         }
       } else if (CU && CU.role === "dataman"){
-        if (placeEl && CU.place) placeEl.value = CU.place;
-        if (placeEl) placeEl.disabled = false;
+        // dataman can register sales only for Store, Dawa, Shet
+        const allowedPlaces = ["Store","Dawa","Shet"];
+        if (placeEl){
+          // rebuild options to allowed subset
+          const current = placeEl.value;
+          placeEl.innerHTML = "";
+          allowedPlaces.forEach(p => {
+            const opt = document.createElement("option");
+            opt.value = p; opt.innerText = p;
+            placeEl.appendChild(opt);
+          });
+          // preselect user's place if provided or default to Store
+          placeEl.value = (CU.place && allowedPlaces.includes(CU.place)) ? CU.place : "Store";
+          placeEl.disabled = false;
+        }
+        // dataman acts as 'Store' salesman contextually
+        if (salesmanSelect){
+          salesmanSelect.innerHTML = "";
+          const opt = document.createElement("option");
+          opt.value = "Store"; opt.innerText = "Store";
+          salesmanSelect.appendChild(opt);
+          salesmanSelect.value = "Store";
+          salesmanSelect.disabled = true;
+        }
       } else {
+        // Other roles (owner or none) keep full list
         if (placeEl) placeEl.disabled = false;
       }
+
       if (placeEl) applyPricesForPlace(placeEl.value);
       loadBankEntries();
       loadExpenses();
@@ -97,7 +120,6 @@ document.addEventListener("DOMContentLoaded", function(){
       console.error(err);
     }
   }
-
   function populateSalesmen(){
     if (!salesmanSelect) return;
     salesmanSelect.innerHTML = "";
@@ -108,21 +130,31 @@ document.addEventListener("DOMContentLoaded", function(){
     SALES_MEN.forEach(s => { const opt = document.createElement("option"); opt.value = s; opt.innerText = s; salesmanSelect.appendChild(opt); });
   }
 
-  function applyPricesForPlace(place){
-    if (!itemsTable) return;
-    const rows = itemsTable.querySelectorAll("tbody tr");
-    rows.forEach(row => {
-      const name = row.dataset.name;
-      const priceInput = row.querySelector(".price");
-      const subtotalEl = row.querySelector(".item-subtotal");
-      let defaultPrice = "";
-      if (PRICE_CONFIG && PRICE_CONFIG["Store"] && PRICE_CONFIG["Store"][name] !== undefined) defaultPrice = PRICE_CONFIG["Store"][name];
-      if (place && PRICE_CONFIG && PRICE_CONFIG[place] && PRICE_CONFIG[place][name] !== undefined && PRICE_CONFIG[place][name] !== null) defaultPrice = PRICE_CONFIG[place][name];
-      priceInput.value = (defaultPrice !== undefined && defaultPrice !== null) ? defaultPrice : "";
-      subtotalEl && (subtotalEl.innerText = "0.00");
-    });
-    recomputeItemsSummary();
-  }
+  // (snippet - replace applyPricesForPlace function body)
+function applyPricesForPlace(place){
+  if (!itemsTable) return;
+  const rows = itemsTable.querySelectorAll("tbody tr");
+  rows.forEach(row => {
+    const name = row.dataset.name;
+    const priceInput = row.querySelector(".price");
+    const subtotalEl = row.querySelector(".item-subtotal");
+    let defaultPrice = "";
+    if (PRICE_CONFIG && PRICE_CONFIG["Store"] && PRICE_CONFIG["Store"][name] !== undefined) defaultPrice = PRICE_CONFIG["Store"][name];
+    if (place && PRICE_CONFIG && PRICE_CONFIG[place] && PRICE_CONFIG[place][name] !== undefined && PRICE_CONFIG[place][name] !== null) defaultPrice = PRICE_CONFIG[place][name];
+    priceInput.value = (defaultPrice !== undefined && defaultPrice !== null) ? defaultPrice : "";
+    subtotalEl && (subtotalEl.innerText = "0.00");
+
+    // Make price editable only for Dawa and Shet; readonly for Store and Vans
+    if (place === "Dawa" || place === "Shet") {
+      priceInput.readOnly = false;
+      priceInput.classList.remove("price-readonly");
+    } else {
+      priceInput.readOnly = true;
+      priceInput.classList.add("price-readonly");
+    }
+  });
+  recomputeItemsSummary();
+}
 
   function recomputeItemsSummary(){
     if (!itemsTable) return;

@@ -1,41 +1,62 @@
 {% extends "base.html" %}
 {% block content %}
-<h2>Sales & Reports</h2>
+<link href="{{ url_for('static', filename='css/reports.css') }}" rel="stylesheet">
 
-<div class="filter-row">
-  <label>Start
-    <input type="date" id="start" value="{{ today }}">
-  </label>
-  <label>End
-    <input type="date" id="end" value="{{ today }}">
-  </label>
+<script>
+  // expose current user info to the page script
+  window.CURRENT_USER = {
+    role: "{{ tmpl_user.role if tmpl_user else '' }}",
+    place: "{{ tmpl_user.place if tmpl_user else '' }}",
+    username: "{{ tmpl_user.username if tmpl_user else '' }}"
+  };
+</script>
 
-  <label>Place
-    <select id="filterPlace">
-      <option value="">All</option>
-      {% for p in places %}
-      <option value="{{ p }}">{{ p }}</option>
-      {% endfor %}
-    </select>
-  </label>
+<div class="d-flex align-items-center justify-content-between mb-3">
+  <div>
+    <h2 class="h4 mb-0"><i class="bi bi-list-task me-2"></i>Sales & Reports</h2>
+    <div class="text-muted small">Vans can view their registered sales, bank payments and expenses.</div>
+  </div>
 
-  <label>Period
-    <select id="reportPeriod">
-      <option value="daily">Daily</option>
-      <option value="weekly">Weekly</option>
-      <option value="monthly">Monthly</option>
-    </select>
-  </label>
-
-  <button id="loadSales" class="btn">Load</button>
-  <button id="closeDayBtn" class="btn">Close Day (selected place)</button>
-  <button id="showBankPayments" class="btn">Show Bank Payments</button>
-  <a id="downloadPdf" class="btn btn-primary" href="#">Download PDF</a>
+  <div class="d-flex gap-2 align-items-end">
+    <div>
+      <label class="form-label small mb-1">Start</label>
+      <input id="start" type="date" class="form-control form-control-sm" value="{{ today }}">
+    </div>
+    <div>
+      <label class="form-label small mb-1">End</label>
+      <input id="end" type="date" class="form-control form-control-sm" value="{{ today }}">
+    </div>
+    <div>
+      <label class="form-label small mb-1">Place</label>
+      <select id="filterPlace" class="form-select form-select-sm">
+        <option value="">All</option>
+        {% for p in places %}
+        <option value="{{ p }}">{{ p }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div>
+      <button id="loadSales" class="btn btn-primary btn-sm"><i class="bi bi-arrow-repeat me-1"></i>Load</button>
+    </div>
+  </div>
 </div>
 
-<div id="salesResults"></div>
+<div id="topSummary" class="row g-3 mb-3"></div>
 
-<div id="closeDayResult" style="margin-top:1rem;background:#fff;padding:1rem;border-radius:8px;display:none"></div>
+<div id="salesResults" class="row g-3"></div>
 
-<div id="bankPaymentsResult" style="margin-top:1rem;background:#fff;padding:1rem;border-radius:8px;display:none"></div>
+<!-- Modals for details -->
+<div class="modal fade" id="salesModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 id="salesModalTitle" class="modal-title">Details</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body" id="salesModalBody"></div>
+    </div>
+  </div>
+</div>
+
+<script src="{{ url_for('static', filename='js/sales_list.js') }}"></script>
 {% endblock %}

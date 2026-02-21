@@ -45,6 +45,12 @@ body{
   border-color: transparent;
   color: white;
 }
+/* append at end of file */
+.price-readonly {
+  background-color: #f8f9fa !important;
+  color: #6c757d !important;
+  cursor: not-allowed;
+}
 .btn-outline-primary {
   border-color: var(--brand-green); color: var(--brand-green);
 }
