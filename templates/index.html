@@ -111,8 +111,8 @@
               <input id="bankAmount" type="number" step="0.01" min="0" class="form-control">
             </div>
             <div class="col-md-4">
-              <label class="form-label small">Customer (optional)</label>
-              <input id="bankCustomer" type="text" class="form-control" placeholder="Customer name on statement">
+              <label class="form-label small">Customer</label>
+              <input id="bankCustomer" type="text" class="form-control" required placeholder="Customer name on statement">
             </div>
             <div class="col-md-2 d-grid">
               <button id="addBankBtn" class="btn btn-outline-success">Add bank payment</button>
@@ -177,16 +177,16 @@
               <input id="bankTotalInput" type="text" class="form-control" readonly value="0.00">
             </div>
             <div class="col-md-3">
-              <label class="form-label small">Cash total (enter to override / optional)</label>
+              <label class="form-label small">Cash total</label>
               <input id="cashOverride" type="number" step="0.01" min="0" class="form-control" placeholder="Optional: enter actual cash">
             </div>
             <div class="col-md-2 d-grid">
               <button id="submitTotalsBtn" class="btn btn-primary">Submit totals</button>
             </div>
           </div>
-          <small class="text-muted d-block mt-2">
+          <!-- <small class="text-muted d-block mt-2">
             Only a single submission is required: bank payments and expenses are added individually; at the end of day submit totals once.
-          </small>
+          </small> -->
         </div>
       </div>
 

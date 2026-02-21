@@ -61,3 +61,28 @@ body{
   .h-hero{ flex-direction:column; align-items:flex-start }
   .form-actions { flex-direction:column; }
 }
+/* Mobile tweaks to improve touch targets and table readability */
+@media (max-width: 576px) {
+  .card-report .actions-bar .btn,
+  .card-report .d-flex .btn {
+    width: 100%;
+    margin-bottom: 8px;
+  }
+
+  .totals-badge {
+    min-width: 64px;
+    display: inline-block;
+    text-align: right;
+  }
+
+  /* Slightly larger inputs on small screens for touch */
+  input.form-control, select.form-select {
+    padding: 0.5rem 0.6rem;
+    font-size: 0.95rem;
+  }
+
+  /* Make aggregate and summary tables horizontally scrollable if wide */
+  .table-responsive {
+    -webkit-overflow-scrolling: touch;
+  }
+}
