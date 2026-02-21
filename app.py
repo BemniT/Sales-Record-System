@@ -37,18 +37,60 @@ app.secret_key = os.environ.get("SECRET_KEY", os.urandom(24))
 logging.basicConfig(level=logging.INFO)
 
 # ---------- Firebase init ----------
+# ---------- Firebase init ----------
 FIREBASE_DB_URL = os.environ.get("FIREBASE_DB_URL", "https://bale-house-rental-default-rtdb.firebaseio.com/")
+
+# Support either:
+# - FIREBASE_CREDENTIAL_PATH pointing to a service-account JSON file on disk, OR
+# - FIREBASE_CREDENTIAL_JSON containing the raw JSON string, OR
+# - FIREBASE_CREDENTIAL_B64 containing base64-encoded JSON (useful for Render env vars)
 CRED_PATH = os.environ.get("FIREBASE_CREDENTIAL_PATH")
-if not CRED_PATH:
+cred_source = None
+
+if CRED_PATH and os.path.exists(CRED_PATH):
+    cred_source = CRED_PATH
+else:
+    # try JSON (plain)
+    cred_json = os.environ.get("FIREBASE_CREDENTIAL_JSON")
+    if not cred_json:
+        # try base64 encoded JSON (safer in some CI systems)
+        import base64
+        cred_b64 = os.environ.get("FIREBASE_CREDENTIAL_B64")
+        if cred_b64:
+            try:
+                cred_json = base64.b64decode(cred_b64).decode("utf-8")
+            except Exception:
+                cred_json = None
+    if cred_json:
+        try:
+            import json
+            cred_dict = json.loads(cred_json)
+            cred_source = cred_dict
+        except Exception as e:
+            raise RuntimeError("Invalid JSON provided in FIREBASE_CREDENTIAL_JSON / FIREBASE_CREDENTIAL_B64") from e
+
+if cred_source is None:
+    # fallback: look for any candidate file in repo root (keeps prior behavior)
     try:
         candidates = [f for f in os.listdir('.') if f.endswith('.json') and ('firebase-adminsdk' in f or 'serviceAccount' in f or 'serviceAccountKey' in f)]
     except Exception:
         candidates = []
     CRED_PATH = candidates[0] if candidates else "serviceAccountKey.json"
-if not os.path.exists(CRED_PATH):
-    raise FileNotFoundError(f"Firebase credential not found at {CRED_PATH}. Set FIREBASE_CREDENTIAL_PATH or place JSON in project root.")
-cred = credentials.Certificate(CRED_PATH)
-firebase_admin.initialize_app(cred, {"databaseURL": FIREBASE_DB_URL})
+    if os.path.exists(CRED_PATH):
+        cred_source = CRED_PATH
+    else:
+        raise FileNotFoundError(
+            "Firebase credential not found. Set FIREBASE_CREDENTIAL_PATH to a file, "
+            "or set FIREBASE_CREDENTIAL_JSON (raw JSON) or FIREBASE_CREDENTIAL_B64 (base64 JSON)."
+        )
+
+# Initialize Firebase app using either the path or the dict
+try:
+    cred = credentials.Certificate(cred_source)
+    firebase_admin.initialize_app(cred, {"databaseURL": FIREBASE_DB_URL})
+except Exception as e:
+    logging.exception("Failed to initialize Firebase admin: %s", e)
+    raise
 
 # Start with a safe provisional root so app responds immediately.
 root_ref = db.reference("Sales Record")
