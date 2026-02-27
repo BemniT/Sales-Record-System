@@ -1,121 +1,167 @@
-// owner.js — minimal client to load summary, draw charts and export PDFs/CSV
-document.addEventListener("DOMContentLoaded", function(){
+// static/js/owner.js
+// Owner dashboard script — loads role-aware summaries and computes top totals.
+// Fixed behavior:
+// - Uses /api/reports/view (role-aware) to compute totals (previous version used a missing endpoint).
+// - Correctly aggregates total sales and total crates across the selected date range.
+// - Renders detail table rows and provides CSV export for the shown range.
+//
+// Usage: place this file as static/js/owner.js and ensure owner_dashboard.html includes it.
+
+document.addEventListener("DOMContentLoaded", function () {
   const loadBtn = document.getElementById("loadSummary");
   const startEl = document.getElementById("start");
   const endEl = document.getElementById("end");
-  const periodEl = document.getElementById("period");
-  const topCards = document.getElementById("topCards");
-  const detailTable = document.querySelector("#detailTable tbody");
-  const exportPdf = document.getElementById("exportPdf");
   const exportCsv = document.getElementById("exportCsv");
+  const exportPdf = document.getElementById("exportPdf");
+  const ownerTotalSalesEl = document.getElementById("ownerTotalSales");
+  const ownerTotalCratesEl = document.getElementById("ownerTotalCrates");
+  const detailTableBody = document.querySelector("#detailTable tbody");
 
-  let placeChart = null;
-  let paymentsChart = null;
-
-  async function loadSummary(e){
-    if (e) e.preventDefault();
-    const start = startEl.value;
-    const end = endEl.value;
-    const period = periodEl.value;
-    if (!start || !end) { alert("Choose start and end"); return; }
-    const res = await fetch(`/api/reports/summary?start=${start}&end=${end}&period=${period}`);
-    const data = await res.json();
-    renderSummary(data);
+  function fmtMoney(n) {
+    return (Number(n) || 0).toFixed(2);
   }
 
-  function renderSummary(data){
-    topCards.innerHTML = "";
-    detailTable.innerHTML = "";
-    // data.summary: { date: { place: {...}, ... } }
-    // Build aggregated numbers per place across range
-    const places = {};
-    let totalSales = 0, totalCash = 0, totalBank = 0, totalCrates = 0;
-    for (const [date, placesObj] of Object.entries(data.summary || {})){
-      for (const [place, v] of Object.entries(placesObj)){
-        if (!v) continue;
-        places[place] = places[place] || {sales:0,cash:0,bank:0,crates:0,rows:[]};
-        places[place].sales += v.sales_total || 0;
-        places[place].cash += v.cash_total || 0;
-        places[place].bank += v.bank_total || 0;
-        places[place].crates += v.crates_total || 0;
-        places[place].rows.push({date, ...v});
-        totalSales += v.sales_total || 0;
-        totalCash += v.cash_total || 0;
-        totalBank += v.bank_total || 0;
-        totalCrates += v.crates_total || 0;
+  function safe(s) {
+    return s === null || s === undefined ? "" : String(s);
+  }
+
+  async function loadSummary(e) {
+    if (e && e.preventDefault) e.preventDefault();
+    const start = startEl && startEl.value;
+    const end = endEl && endEl.value;
+    if (!start || !end) {
+      alert("Please choose start and end dates.");
+      return;
+    }
+
+    // Call the role-aware report view endpoint
+    const url = `/api/reports/view?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`;
+    try {
+      loadBtn && (loadBtn.disabled = true);
+      const res = await fetch(url);
+      if (!res.ok) {
+        const payload = await res.json().catch(() => ({}));
+        throw new Error((payload && payload.error) ? payload.error : `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      const summary = data && data.summary ? data.summary : data || {};
+      renderOwnerSummary(summary, start, end);
+    } catch (err) {
+      console.error("Failed to load owner summary:", err);
+      alert("Failed to load summary: " + (err.message || err));
+    } finally {
+      loadBtn && (loadBtn.disabled = false);
+    }
+  }
+
+  function renderOwnerSummary(summary, start, end) {
+    // summary expected: { date: { place: { ...summary... } } }
+    let totalSales = 0;
+    let totalCrates = 0;
+
+    // Clear existing detail rows
+    if (detailTableBody) detailTableBody.innerHTML = "";
+
+    const dates = Object.keys(summary || {}).sort();
+    for (const date of dates) {
+      const placesObj = summary[date] || {};
+      for (const [place, v] of Object.entries(placesObj)) {
+        // v may be summary object returned by compute_place_day_summary:
+        // look for v.total_sales, v.sales_total, v.crates_total, crates_total
+        const salesVal = Number(v && (v.total_sales ?? v.sales_total ?? v.sales_total_computed) || v.total_sales || 0);
+        const cratesVal = Number(v && (v.crates_total ?? v.crates_total_computed) || 0);
+
+        totalSales += salesVal;
+        totalCrates += cratesVal;
+
+        if (detailTableBody) {
+          const tr = document.createElement("tr");
+          // keep cells: date, place, status, crates_total, total_sales, cash_total, bank_total, created_by
+          const status = safe(v.status || (v.version && v.version.status) || "");
+          const createdBy = safe(v.created_by || (v.version && v.version.created_by) || "");
+          const cash = Number(v.cash_total ?? v.cash_total_computed ?? 0);
+          const bank = Number(v.bank_total ?? v.bank_total_calculated ?? 0);
+          tr.innerHTML = `
+            <td>${safe(date)}</td>
+            <td>${safe(place)}</td>
+            <td>${escapeHtml(status)}</td>
+            <td class="text-end">${Number(cratesVal || 0)}</td>
+            <td class="text-end">${fmtMoney(salesVal)}</td>
+            <td class="text-end">${fmtMoney(cash)}</td>
+            <td class="text-end">${fmtMoney(bank)}</td>
+            <td>${escapeHtml(createdBy)}</td>
+          `;
+          detailTableBody.appendChild(tr);
+        }
       }
     }
 
-    // top cards
-    const fragment = document.createDocumentFragment();
-    fragment.appendChild(cardEl("Total Sales", totalSales.toFixed(2)));
-    fragment.appendChild(cardEl("Total Crates", totalCrates));
-    fragment.appendChild(cardEl("Total Cash", totalCash.toFixed(2)));
-    fragment.appendChild(cardEl("Total Bank", totalBank.toFixed(2)));
-    topCards.appendChild(fragment);
+    // Update top totals
+    if (ownerTotalSalesEl) ownerTotalSalesEl.textContent = fmtMoney(totalSales);
+    if (ownerTotalCratesEl) ownerTotalCratesEl.textContent = String(Math.round(totalCrates));
+  }
 
-    // detail table rows
-    for (const [place, p] of Object.entries(places)){
-      for (const r of p.rows){
-        const tr = document.createElement("tr");
-        tr.innerHTML = `<td>${r.date}</td><td>${place}</td><td>${r.status||''}</td><td>${r.crates_total||0}</td><td>${(r.total_sales||0).toFixed(2)}</td><td>${(r.cash_total||0).toFixed(2)}</td><td>${(r.bank_total||0).toFixed(2)}</td><td>${r.created_by||''}</td>`;
-        detailTable.appendChild(tr);
-      }
+  // CSV export for owner top button. Exports the details currently visible (uses same summary fetch).
+  async function exportCsvTop() {
+    const start = startEl && startEl.value;
+    const end = endEl && endEl.value;
+    if (!start || !end) {
+      alert("Please choose start and end dates before exporting.");
+      return;
     }
-
-    // place chart
-    const placeLabels = Object.keys(places);
-    const placeData = placeLabels.map(p => places[p].sales || 0);
-    renderBarChart("placeChart", placeLabels, placeData, "Sales by place");
-
-    // payments chart
-    const payLabels = placeLabels;
-    const cashData = placeLabels.map(p => places[p].cash || 0);
-    const bankData = placeLabels.map(p => places[p].bank || 0);
-    renderStackedBar("paymentsChart", payLabels, [cashData, bankData], ["Cash","Bank"]);
+    // Fetch same data and serialize
+    const url = `/api/reports/view?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`;
+    try {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error("Failed to load summary for export");
+      const data = await res.json();
+      const summary = data && data.summary ? data.summary : data || {};
+      const rows = [];
+      // header
+      rows.push(["date","place","status","created_by","crates_total","total_sales","cash_total","bank_total"]);
+      const dates = Object.keys(summary || {}).sort();
+      for (const date of dates) {
+        const placesObj = summary[date] || {};
+        for (const [place, v] of Object.entries(placesObj)) {
+          const status = v.status || (v.version && v.version.status) || "";
+          const createdBy = v.created_by || (v.version && v.version.created_by) || "";
+          const crates = Number(v.crates_total || 0);
+          const sales = Number(v.total_sales || v.sales_total || 0);
+          const cash = Number(v.cash_total ?? v.cash_total_computed ?? 0);
+          const bank = Number(v.bank_total ?? v.bank_total_calculated ?? 0);
+          rows.push([date, place, status, createdBy, crates, fmtMoney(sales), fmtMoney(cash), fmtMoney(bank)]);
+        }
+      }
+      if (rows.length <= 1) { alert("No data to export for selected range."); return; }
+      const csv = rows.map(r => r.map(cell => `"${String(cell).replace(/"/g,'""')}"`).join(",")).join("\n");
+      const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+      const urlObj = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = urlObj;
+      a.download = `owner_summary_${start}_to_${end}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(urlObj);
+    } catch (err) {
+      console.error(err);
+      alert("Export failed: " + (err.message || err));
+    }
   }
 
-  function cardEl(label, value){
-    const col = document.createElement("div");
-    col.className = "col-md-3";
-    col.innerHTML = `<div class="card p-3 h-100"><div class="top-number">${value}</div><div class="top-label">${label}</div></div>`;
-    return col;
+  // small helper for safely escaping (used in table content where innerText not used)
+  function escapeHtml(s) {
+    if (s === null || s === undefined) return "";
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   }
 
-  function renderBarChart(canvasId, labels, data, title){
-    const ctx = document.getElementById(canvasId).getContext("2d");
-    if (window[canvasId+"Chart"]) window[canvasId+"Chart"].destroy();
-    window[canvasId+"Chart"] = new Chart(ctx, {
-      type: 'bar',
-      data: { labels, datasets:[{ label:title, data, backgroundColor: '#0d6efd'}] },
-      options:{ responsive:true, plugins:{ legend:{display:false} } }
-    });
+  // Wire events
+  if (loadBtn) loadBtn.addEventListener("click", loadSummary);
+  const exportCsvTopBtn = document.getElementById("exportCsvTop") || exportCsv;
+  if (exportCsvTopBtn) exportCsvTopBtn.addEventListener("click", exportCsvTop);
+
+  // Auto-load once if dates are present
+  if (startEl && endEl && startEl.value && endEl.value) {
+    loadSummary();
   }
-
-  function renderStackedBar(canvasId, labels, datasetsData, datasetsLabels){
-    const ctx = document.getElementById(canvasId).getContext("2d");
-    if (window[canvasId+"Chart"]) window[canvasId+"Chart"].destroy();
-    const datasets = datasetsData.map((d,i)=>({ label: datasetsLabels[i], data: d, backgroundColor: i===0 ? '#198754' : '#ffc107' }));
-    window[canvasId+"Chart"] = new Chart(ctx, {
-      type: 'bar',
-      data: { labels, datasets },
-      options:{ responsive:true, plugins:{ legend:{position:'bottom'} }, scales:{ x:{ stacked:true }, y:{ stacked:true } } }
-    });
-  }
-
-  // Export handlers
-  exportPdf.addEventListener("click", ()=>{
-    const start = startEl.value, end = endEl.value, period = periodEl.value;
-    if (!start || !end) { alert("Pick dates"); return; }
-    window.location = `/report/pdf?start=${start}&end=${end}&period=${period}`;
-  });
-  exportCsv.addEventListener("click", ()=>{
-    const start = startEl.value, end = endEl.value, period = periodEl.value;
-    if (!start || !end) { alert("Pick dates"); return; }
-    window.location = `/report/csv?start=${start}&end=${end}&period=${period}`;
-  });
-
-  loadBtn.addEventListener("click", loadSummary);
-  // initial load
-  loadSummary();
 });

@@ -1,5 +1,9 @@
 // main.js — adds expenses support and a confirmation modal for submit_totals
-
+// Includes:
+// - readonly price behavior for Store and Vans (Van 2/Van 3)
+// - live computed totals and crates
+// - totalSales manual override detection
+// - required cash input and live cash preview
 document.addEventListener("DOMContentLoaded", function(){
   // Element refs
   const placeEl = document.getElementById("place");
@@ -51,6 +55,8 @@ document.addEventListener("DOMContentLoaded", function(){
   let currentExpenses = [];
   const CU = window.CURRENT_USER || {};
 
+  let totalManualOverride = false;
+
   function showMessage(text, isError){
     if (!messageEl) return;
     messageEl.style.display = "block";
@@ -60,7 +66,7 @@ document.addEventListener("DOMContentLoaded", function(){
     setTimeout(()=> { if (messageEl) messageEl.style.display = "none"; }, 5000);
   }
 
-    async function loadConfig(){
+  async function loadConfig(){
     try {
       const res = await fetch("/api/config");
       if (!res.ok) throw new Error("Failed to load config");
@@ -71,7 +77,6 @@ document.addEventListener("DOMContentLoaded", function(){
 
       // Role-specific adjustments
       if (CU && CU.role === "van"){
-        // van behavior: preselect salesman and place and lock them
         if (SALES_MEN.length){
           const found = SALES_MEN.find(x => x.toLowerCase().includes((CU.username||"").toLowerCase()));
           if (found) salesmanSelect.value = found;
@@ -84,22 +89,17 @@ document.addEventListener("DOMContentLoaded", function(){
           placeEl.disabled = true;
         }
       } else if (CU && CU.role === "dataman"){
-        // dataman can register sales only for Store, Dawa, Shet
         const allowedPlaces = ["Store","Dawa","Shet"];
         if (placeEl){
-          // rebuild options to allowed subset
-          const current = placeEl.value;
           placeEl.innerHTML = "";
           allowedPlaces.forEach(p => {
             const opt = document.createElement("option");
             opt.value = p; opt.innerText = p;
             placeEl.appendChild(opt);
           });
-          // preselect user's place if provided or default to Store
           placeEl.value = (CU.place && allowedPlaces.includes(CU.place)) ? CU.place : "Store";
           placeEl.disabled = false;
         }
-        // dataman acts as 'Store' salesman contextually
         if (salesmanSelect){
           salesmanSelect.innerHTML = "";
           const opt = document.createElement("option");
@@ -109,7 +109,6 @@ document.addEventListener("DOMContentLoaded", function(){
           salesmanSelect.disabled = true;
         }
       } else {
-        // Other roles (owner or none) keep full list
         if (placeEl) placeEl.disabled = false;
       }
 
@@ -120,6 +119,7 @@ document.addEventListener("DOMContentLoaded", function(){
       console.error(err);
     }
   }
+
   function populateSalesmen(){
     if (!salesmanSelect) return;
     salesmanSelect.innerHTML = "";
@@ -130,31 +130,30 @@ document.addEventListener("DOMContentLoaded", function(){
     SALES_MEN.forEach(s => { const opt = document.createElement("option"); opt.value = s; opt.innerText = s; salesmanSelect.appendChild(opt); });
   }
 
-  // (snippet - replace applyPricesForPlace function body)
-function applyPricesForPlace(place){
-  if (!itemsTable) return;
-  const rows = itemsTable.querySelectorAll("tbody tr");
-  rows.forEach(row => {
-    const name = row.dataset.name;
-    const priceInput = row.querySelector(".price");
-    const subtotalEl = row.querySelector(".item-subtotal");
-    let defaultPrice = "";
-    if (PRICE_CONFIG && PRICE_CONFIG["Store"] && PRICE_CONFIG["Store"][name] !== undefined) defaultPrice = PRICE_CONFIG["Store"][name];
-    if (place && PRICE_CONFIG && PRICE_CONFIG[place] && PRICE_CONFIG[place][name] !== undefined && PRICE_CONFIG[place][name] !== null) defaultPrice = PRICE_CONFIG[place][name];
-    priceInput.value = (defaultPrice !== undefined && defaultPrice !== null) ? defaultPrice : "";
-    subtotalEl && (subtotalEl.innerText = "0.00");
+  // Make price editable only for Dawa and Shet; readonly for Store and Vans
+  function applyPricesForPlace(place){
+    if (!itemsTable) return;
+    const rows = itemsTable.querySelectorAll("tbody tr");
+    rows.forEach(row => {
+      const name = row.dataset.name;
+      const priceInput = row.querySelector(".price");
+      const subtotalEl = row.querySelector(".item-subtotal");
+      let defaultPrice = "";
+      if (PRICE_CONFIG && PRICE_CONFIG["Store"] && PRICE_CONFIG["Store"][name] !== undefined) defaultPrice = PRICE_CONFIG["Store"][name];
+      if (place && PRICE_CONFIG && PRICE_CONFIG[place] && PRICE_CONFIG[place][name] !== undefined && PRICE_CONFIG[place][name] !== null) defaultPrice = PRICE_CONFIG[place][name];
+      priceInput.value = (defaultPrice !== undefined && defaultPrice !== null) ? defaultPrice : "";
+      subtotalEl && (subtotalEl.innerText = "0.00");
 
-    // Make price editable only for Dawa and Shet; readonly for Store and Vans
-    if (place === "Dawa" || place === "Shet") {
-      priceInput.readOnly = false;
-      priceInput.classList.remove("price-readonly");
-    } else {
-      priceInput.readOnly = true;
-      priceInput.classList.add("price-readonly");
-    }
-  });
-  recomputeItemsSummary();
-}
+      if (place === "Dawa" || place === "Shet") {
+        priceInput.readOnly = false;
+        priceInput.classList.remove("price-readonly");
+      } else {
+        priceInput.readOnly = true;
+        priceInput.classList.add("price-readonly");
+      }
+    });
+    recomputeItemsSummary();
+  }
 
   function recomputeItemsSummary(){
     if (!itemsTable) return;
@@ -172,15 +171,24 @@ function applyPricesForPlace(place){
     });
     computedTotalEl && (computedTotalEl.value = total.toFixed(2));
     computedCratesEl && (computedCratesEl.value = crates);
+
+    // Only auto-fill Total Sales when the user hasn't manually overridden it
+    if (totalSalesInput && !totalManualOverride) {
+      totalSalesInput.value = total.toFixed(2);
+    }
+
+    // update bank/expenses-based preview (suggested cash)
+    const bankTotal = parseFloat(bankTotalInput ? (bankTotalInput.value || 0) : 0) || 0;
+    const expensesTotal = parseFloat(expensesTotalDisplay ? (expensesTotalDisplay.innerText || 0) : 0) || 0;
+    const suggestedCash = total - bankTotal - expensesTotal;
+    paidPreviewEl && (paidPreviewEl.value = suggestedCash.toFixed(2));
+
     if (totalSalesInput && (!totalSalesInput.value || totalSalesInput.value === "")) {
       totalSalesInput.value = total.toFixed(2);
     }
-    const bankTotal = parseFloat(bankTotalInput ? (bankTotalInput.value || 0) : 0) || 0;
-    const expensesTotal = parseFloat(expensesTotalDisplay ? (expensesTotalDisplay.innerText || 0) : 0) || 0;
-    paidPreviewEl && (paidPreviewEl.value = (total - bankTotal - expensesTotal).toFixed(2));
   }
 
-  // Bank entries functions (as before)
+  // Bank entries functions
   async function loadBankEntries(){
     if (!bankEntriesList) return;
     const date = document.getElementById("date").value;
@@ -347,6 +355,18 @@ function applyPricesForPlace(place){
   }
 
   // SUBMIT TOTALS with confirmation modal
+  if (totalSalesInput) {
+    totalSalesInput.addEventListener('input', function () {
+      totalManualOverride = !!this.value && this.value.toString().trim() !== "";
+    });
+  }
+  if (cashOverrideInput) {
+    cashOverrideInput.addEventListener('input', function () {
+      const cashVal = parseFloat(this.value || 0) || 0;
+      paidPreviewEl && (paidPreviewEl.value = cashVal.toFixed(2));
+    });
+  }
+
   async function prepareSubmitTotals(){
     const date = document.getElementById("date").value;
     const place = placeEl ? placeEl.value : "";
@@ -394,7 +414,14 @@ function applyPricesForPlace(place){
 
     const bankTotal = parseFloat(bankTotalInput ? (bankTotalInput.value || 0) : 0) || 0;
     const expensesTotal = parseFloat(expensesTotalDisplay ? (expensesTotalDisplay.innerText || 0) : 0) || 0;
-    const cashPreview = (totalSalesToSend - bankTotal - expensesTotal).toFixed(2);
+
+    // cash must be provided (required now)
+    const cashValRaw = (cashOverrideInput && cashOverrideInput.value) ? cashOverrideInput.value : null;
+    if (cashValRaw === null || cashValRaw.toString().trim() === "") {
+      showMessage("Please enter the cash amount (required).", true);
+      return;
+    }
+    const cashProvided = parseFloat(cashValRaw || 0) || 0;
 
     // Fill modal values
     modalDate && (modalDate.innerText = date);
@@ -402,7 +429,7 @@ function applyPricesForPlace(place){
     modalTotalSales && (modalTotalSales.innerText = totalSalesToSend.toFixed(2));
     modalBankTotal && (modalBankTotal.innerText = bankTotal.toFixed(2));
     modalExpensesTotal && (modalExpensesTotal.innerText = expensesTotal.toFixed(2));
-    modalCashTotal && (modalCashTotal.innerText = cashPreview);
+    modalCashTotal && (modalCashTotal.innerText = cashProvided.toFixed(2));
 
     // Show modal
     if (!confirmModal){
@@ -410,19 +437,19 @@ function applyPricesForPlace(place){
     }
     confirmModal.show();
 
-    // on confirm click, perform actual submit
+    // on confirm click, perform actual submit including cash value
     confirmSubmitBtn.onclick = async function(){
       confirmSubmitBtn.disabled = true;
-      await doSubmitTotals({ totalSalesToSend, items });
+      await doSubmitTotals({ totalSalesToSend, items, cashProvided });
       confirmSubmitBtn.disabled = false;
       confirmModal.hide();
     };
   }
 
-  async function doSubmitTotals({ totalSalesToSend, items }){
+  async function doSubmitTotals({ totalSalesToSend, items, cashProvided }){
     const date = document.getElementById("date").value;
     const place = placeEl ? placeEl.value : "";
-    const cashOverride = cashOverrideInput && cashOverrideInput.value ? parseFloat(cashOverrideInput.value) : null;
+    const cashOverride = (typeof cashProvided !== 'undefined') ? cashProvided : null;
     try {
       submitTotalsBtn.disabled = true;
       const body = { total_sales: totalSalesToSend, items: items };
@@ -439,6 +466,7 @@ function applyPricesForPlace(place){
       await loadBankEntries();
       await loadExpenses();
       totalSalesInput.value = ""; cashOverrideInput.value = "";
+      totalManualOverride = false;
       computedTotalEl.value = "0.00"; computedCratesEl.value = "0"; paidPreviewEl.value = "0.00";
       // reset item rows
       document.querySelectorAll("#itemsTable tbody tr").forEach(r => {

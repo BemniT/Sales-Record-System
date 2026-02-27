@@ -9,10 +9,9 @@
 //
 // Notes:
 // - Defensive: checks DOM nodes exist before wiring listeners to avoid "addEventListener of null" errors.
-// - PDF generation uses a printable window approach (works on desktop & mobile via browser Print -> Save as PDF).
-// - CSV download is plain text CSV; Excel will open it without issue.
-//
-// Assumes presence of Bootstrap 5 on page and the API endpoints implemented server-side.
+// - Adds small bank-preview on each place card so dataman/owner can see recent bank entries without opening Details.
+// - If owner dashboard summary elements (#ownerTotalSales, #ownerTotalCrates) exist they are updated here
+//   so owners see totals even if owner-specific JS isn't used.
 
 document.addEventListener("DOMContentLoaded", function () {
   // Elements (may be missing on some pages; be defensive)
@@ -44,17 +43,28 @@ document.addEventListener("DOMContentLoaded", function () {
     try { const d = new Date(iso); return d.toLocaleString(); } catch (e) { return iso; }
   }
 
+  // Small helper that builds a compact preview HTML for bank entries (first 2 entries)
+  function bankPreviewHtml(bankEntries) {
+    bankEntries = toList(bankEntries || []);
+    if (!bankEntries.length) return `<div class="small-muted">No bank preview</div>`;
+    const preview = bankEntries.slice(0,2).map(b => {
+      const bank = escapeHtml(b.bank || b.display || "");
+      const amt = fmtMoney(b.amount || 0);
+      const cust = escapeHtml(b.customer || "");
+      return `<div class="small"><strong>${bank}</strong> <span class="text-muted">(${amt})</span> ${cust ? `— ${cust}` : ''}</div>`;
+    }).join("");
+    const more = bankEntries.length > 2 ? `<div class="small text-muted">+ ${bankEntries.length-2} more</div>` : "";
+    return `<div class="bank-preview mt-2">${preview}${more}</div>`;
+  }
+
   // ---------------------
   // Load & render summary
   // ---------------------
   async function loadSummary(e) {
     if (e && e.preventDefault) e.preventDefault();
-    if (!startEl || !endEl) {
-      // If there are no date filters, still try to load using today's date
-    }
+    // If date filters present, require them
     const start = startEl ? startEl.value : "";
     const end = endEl ? endEl.value : "";
-
     if (startEl && endEl && (!start || !end)) {
       alert("Choose start and end dates");
       return;
@@ -67,7 +77,7 @@ document.addEventListener("DOMContentLoaded", function () {
       const qs = new URLSearchParams();
       if (start) qs.set("start", start);
       if (end) qs.set("end", end);
-      // respect optional places param input; API will decide places based on role if none provided
+      // API decides places shown depending on role
       const url = `/api/reports/view?${qs.toString()}`;
       const res = await fetch(url);
       if (!res.ok) {
@@ -102,6 +112,11 @@ document.addEventListener("DOMContentLoaded", function () {
     if (!summary || Object.keys(summary).length === 0) {
       summaryArea.innerHTML = `<div class="col-12"><div class="card-report empty-state"><i class="bi bi-inbox me-2" style="font-size:1.4rem"></i>No report data found for the selected range.</div></div>`;
       renderAggregateTable({}, []); // empty aggregate
+      // ensure owner totals reset
+      const ownerTotalEl = document.getElementById("ownerTotalSales");
+      const ownerCratesEl = document.getElementById("ownerTotalCrates");
+      if (ownerTotalEl) ownerTotalEl.innerText = "0.00";
+      if (ownerCratesEl) ownerCratesEl.innerText = "0";
       return;
     }
     // Normalize structure to summary[date][place] => normalized entry
@@ -126,6 +141,9 @@ document.addEventListener("DOMContentLoaded", function () {
 
     // Build aggregate matrix source while rendering cards
     const aggregateSource = {}; // aggregateSource[place][item] = crates
+
+    // Track totals for owner summary element updates
+    let ownerTotals = { sales: 0, crates: 0 };
 
     // Toolbar: export buttons and aggregate title (inserted once above summary cards)
     const toolbarRow = document.createElement("div");
@@ -162,6 +180,10 @@ document.addEventListener("DOMContentLoaded", function () {
 
       for (const [place, vRaw] of Object.entries(places)) {
         const v = normalizeEntry(vRaw);
+        // accumulate for owner totals
+        ownerTotals.sales += Number(v.total_sales || 0);
+        ownerTotals.crates += Number(v.crates_total || 0);
+
         // populate aggregateSource from v: prefer version.items if present, otherwise sum from v.sales
         if (!aggregateSource[place]) aggregateSource[place] = {};
 
@@ -190,7 +212,11 @@ document.addEventListener("DOMContentLoaded", function () {
           }
         }
 
-        // Render place card
+        // bank preview html (prefer version snapshot bank_entries if present)
+        const bankEntriesForPreview = (v.version && v.version.bank_entries && v.version.bank_entries.length) ? v.version.bank_entries : v.bank_entries || [];
+        const bankPreview = bankPreviewHtml(bankEntriesForPreview);
+
+        // Render place card (include bank preview)
         const cardCol = document.createElement("div");
         cardCol.className = "col-md-6";
         const salesFmt = fmtMoney(v.total_sales || 0);
@@ -216,6 +242,8 @@ document.addEventListener("DOMContentLoaded", function () {
               <button class="btn btn-outline-secondary btn-sm view-versions-btn" data-date="${escapeHtml(date)}" data-place="${escapeHtml(place)}"><i class="bi bi-stack me-1"></i>Versions</button>
               <button class="btn btn-outline-info btn-sm export-csv-btn" data-date="${escapeHtml(date)}" data-place="${escapeHtml(place)}"><i class="bi bi-download me-1"></i>CSV</button>
             </div>
+            <div class="mt-2 small text-muted">Recent bank entries</div>
+            ${bankPreview}
             <div class="details-area" style="display:none;margin-top:12px;"></div>
           </div>`;
         placesContainer.appendChild(cardCol);
@@ -247,6 +275,12 @@ document.addEventListener("DOMContentLoaded", function () {
         });
       }
     } // end for dates
+
+    // Update owner dashboard top totals if those elements exist
+    const ownerTotalEl = document.getElementById("ownerTotalSales");
+    const ownerCratesEl = document.getElementById("ownerTotalCrates");
+    if (ownerTotalEl) ownerTotalEl.innerText = (ownerTotals.sales || 0).toFixed(2);
+    if (ownerCratesEl) ownerCratesEl.innerText = (ownerTotals.crates || 0);
 
     // After cards, render aggregate table for full range
     renderAggregateTable(aggregateSource, Object.keys(data.summary || {}));
@@ -326,8 +360,9 @@ document.addEventListener("DOMContentLoaded", function () {
     const beCard = document.createElement("div");
     beCard.className = "mb-3";
     beCard.innerHTML = `<h6 class="mb-2"><i class="bi bi-bank2 me-1"></i>Bank entries</h6>`;
-    if (v.bank_entries && v.bank_entries.length) {
-      let beRows = v.bank_entries.map(b => {
+    const bankEntries = toList((v.version && v.version.bank_entries && v.version.bank_entries.length) ? v.version.bank_entries : v.bank_entries || []);
+    if (bankEntries && bankEntries.length) {
+      let beRows = bankEntries.map(b => {
         const bank = escapeHtml(b.bank || b.display || "");
         const amt = fmtMoney(b.amount || 0);
         const cust = escapeHtml(b.customer || "");
@@ -345,8 +380,9 @@ document.addEventListener("DOMContentLoaded", function () {
     const exCard = document.createElement("div");
     exCard.className = "mb-3";
     exCard.innerHTML = `<h6 class="mb-2"><i class="bi bi-receipt me-1"></i>Expenses</h6>`;
-    if (v.expenses && v.expenses.length) {
-      let exRows = v.expenses.map(e => {
+    const expenses = toList((v.version && v.version.expenses && v.version.expenses.length) ? v.version.expenses : v.expenses || []);
+    if (expenses && expenses.length) {
+      let exRows = expenses.map(e => {
         const amt = fmtMoney(e.amount || 0);
         const desc = escapeHtml(e.description || "");
         const by = escapeHtml(e.created_by || "");
@@ -819,6 +855,7 @@ document.addEventListener("DOMContentLoaded", function () {
     a.remove();
     URL.revokeObjectURL(url);
   }
+  
 
   // Attach exportPlaceCSV to global so card handlers can call it (older code uses it)
   window.exportPlaceCSV = exportPlaceCSV;

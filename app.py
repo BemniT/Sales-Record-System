@@ -37,7 +37,6 @@ app.secret_key = os.environ.get("SECRET_KEY", os.urandom(24))
 logging.basicConfig(level=logging.INFO)
 
 # ---------- Firebase init ----------
-# ---------- Firebase init ----------
 FIREBASE_DB_URL = os.environ.get("FIREBASE_DB_URL", "https://bale-house-rental-default-rtdb.firebaseio.com/")
 
 # Support either:
@@ -129,7 +128,7 @@ ITEMS = [
     "HARAR RB Crate 24x33cl XLN ET LRM",
     "BEDELE Special RB Crt 20x50cl XLN ET LRM",
     "BEDELE Special RB Crt 24x33cl XLN ET LRM",
-    "WALIA RB Crate 20x50cl XLN ET LRM",
+    "WALIA RB CRATE 20X50CL XLN ET LRM",
     "WALIA RB Crate 24x33cl XLN ET LRM",
     "SOFI RB CRATE 24X33CL XLN ET",
     "BUCKLER 0.0% RB CRATE 24X33CL XLN ET"
@@ -143,7 +142,7 @@ DB_KEY_TO_DISPLAY = {
     "harar_24x33": "HARAR RB Crate 24x33cl XLN ET LRM",
     "bedele_20x50": "BEDELE Special RB Crt 20x50cl XLN ET LRM",
     "bedele_24x33": "BEDELE Special RB Crt 24x33cl XLN ET LRM",
-    "walia_20x50": "WALIA RB Crate 20x50cl XLN ET LRM",
+    "walia_20x50": "WALIA RB CRATE 20X50CL XLN ET LRM",
     "walia_24x33": "WALIA RB Crate 24x33cl XLN ET LRM",
     "sofi_24x33": "SOFI RB CRATE 24X33CL XLN ET",
     "buckler_0_0_24x33": "BUCKLER 0.0% RB CRATE 24X33CL XLN ET",
@@ -262,8 +261,6 @@ def inject_template_helpers():
 def setup_user_page():
     existing = users_ref().get() or {}
     if existing:
-        # If users already exist, hide setup form (do not expose to regular users)
-        # Still render a simple message linking to login.
         return render_template("login.html", error="Initial setup already completed. Please sign in.")
     if request.method == "POST":
         username = (request.form.get("username") or "").strip()
@@ -277,7 +274,6 @@ def setup_user_page():
 
 @app.route("/login", methods=["GET"])
 def login_page():
-    # Always render login page. Setup is only allowed if no users exist.
     return render_template("login.html")
 
 @app.route("/login", methods=["POST"])
@@ -311,7 +307,6 @@ def owner_dashboard():
 @login_required
 @role_required("dataman")
 def dataman_dashboard():
-    # Dataman can register sales for Store/Dawa/Shet -> link to 'index' (register sales)
     return render_template("dataman_dashboard.html", places=PLACES)
 
 @app.route("/van")
@@ -438,7 +433,6 @@ def save_sale_to_db(sale: dict) -> None:
 
 @app.route("/submit", methods=["POST"])
 @login_required
-# (snippet - replace the submit_sale function and the api_reports_view role==dataman block)
 def submit_sale():
     u = current_user()
     if not u: return jsonify({"error":"auth required"}), 401
@@ -647,6 +641,7 @@ def add_bank_entry(date, place):
         if normalize_place_name(user.get("place")) != place:
             return jsonify({"error": "van users may only add entries for their assigned place"}), 403
     entry_id = uuid.uuid4().hex
+    # Default transferred to False so owner must confirm transfer
     entry_obj = {
         "id": entry_id,
         "created_by": user["username"],
@@ -655,7 +650,8 @@ def add_bank_entry(date, place):
         "amount": round(amount, 2),
         "customer": data.get("customer", ""),
         "items": data.get("items") or {},
-        "consumed_by": ""
+        "consumed_by": "",
+        "transferred": False
     }
     ref = reports_base_ref().child(date).child(place).child("bank_entries").child(entry_id)
     try:
@@ -696,6 +692,55 @@ def delete_bank_entry(date, place, entry_id):
         logging.exception("Failed to delete bank entry")
         return jsonify({"error": "failed to delete", "details": str(e)}), 500
     return jsonify({"status": "ok"})
+
+# New: PATCH bank_entry for edits (owner/dataman can edit any; van only own not-consumed)
+@app.route("/api/reports/<date>/<place>/bank_entry/<entry_id>", methods=["PATCH"])
+@login_required
+def patch_bank_entry(date, place, entry_id):
+    user = current_user()
+    place = normalize_place_name(place)
+    node = reports_base_ref().child(date).child(place).child("bank_entries").child(entry_id)
+    entry = node.get()
+    if not entry:
+        return jsonify({"error": "entry not found"}), 404
+    # prevent editing if consumed
+    if entry.get("consumed_by"):
+        return jsonify({"error": "entry already consumed by a report version and cannot be edited"}), 400
+    # van restrictions
+    if user.get("role") == "van":
+        if normalize_place_name(user.get("place")) != place:
+            return jsonify({"error": "van users may only edit entries for their assigned place"}), 403
+        if entry.get("created_by") != user["username"]:
+            return jsonify({"error": "van may only edit their own entries"}), 403
+    # dataman and owner allowed
+    data = request.json or {}
+    patch = {}
+    if "bank" in data:
+        bank = (data.get("bank") or "").strip()
+        if not bank:
+            return jsonify({"error":"bank is required"}), 400
+        patch["bank"] = bank
+    if "customer" in data:
+        patch["customer"] = data.get("customer") or ""
+    if "amount" in data:
+        try:
+            amt = float(data.get("amount") or 0)
+        except Exception:
+            return jsonify({"error":"invalid amount"}), 400
+        if amt <= 0:
+            return jsonify({"error":"amount must be positive"}), 400
+        patch["amount"] = round(amt, 2)
+    if "transferred" in data:
+        patch["transferred"] = bool(data.get("transferred"))
+    if not patch:
+        return jsonify({"error":"nothing to update"}), 400
+    try:
+        node.update(patch)
+    except Exception as e:
+        logging.exception("Failed to patch bank entry")
+        return jsonify({"error":"failed to update", "details": str(e)}), 500
+    updated = node.get()
+    return jsonify({"status":"ok", "entry": updated})
 
 # ---------- Expenses endpoints ----------
 @app.route("/api/reports/<date>/<place>/expenses", methods=["POST"])
@@ -827,7 +872,12 @@ def submit_totals(date, place):
     be_node = reports_base_ref().child(date).child(place).child("bank_entries")
     entries_map = be_node.get() or {}
     bank_entries_list = list(entries_map.values())
-    bank_total = round(sum(float(e.get("amount") or 0) for e in bank_entries_list), 2)
+    # bank_total sums only transferred entries (legacy entries without transferred flag are included)
+    def _is_included_bank_entry(e):
+        if not isinstance(e, dict): return False
+        if "transferred" not in e: return True
+        return bool(e.get("transferred"))
+    bank_total = round(sum(float(e.get("amount") or 0) for e in bank_entries_list if _is_included_bank_entry(e)), 2)
 
     exp_node = reports_base_ref().child(date).child(place).child("expenses")
     exps_map = exp_node.get() or {}
@@ -892,19 +942,6 @@ def submit_totals(date, place):
 @login_required
 @role_required("dataman")
 def create_correction(date, place):
-    """
-    Dataman can create a correction version — provide items map or total_sales, optional bank_entries/expenses lists.
-    Body example:
-    {
-      "items": {"HARAR ...": 10, ...},        # optional
-      "total_sales": 40520,                   # optional if items present or used directly
-      "cash_total": 370,                      # optional
-      "bank_entries": [{"bank":"Awash","amount":100}, ...],  # optional
-      "expenses": [{"description":"fuel","amount":50}, ...], # optional
-      "note": "correction after recount",
-      "prev_version": ""                       # optional
-    }
-    """
     user = current_user()
     place = normalize_place_name(place)
     data = request.json or {}
@@ -913,7 +950,6 @@ def create_correction(date, place):
     bank_entries = data.get("bank_entries") or []
     expenses = data.get("expenses") or []
 
-    # compute total_sales from items if provided
     computed_total_sales = None
     if isinstance(items, dict) and items:
         cfg = root_ref.child("config").get() or {}
@@ -953,7 +989,6 @@ def create_correction(date, place):
     else:
         total_sales = computed_total_sales
 
-    # totals for bank / expenses (sum arrays if provided)
     bank_total = round(sum(float(b.get("amount") or 0) for b in bank_entries), 2)
     expenses_total = round(sum(float(e.get("amount") or 0) for e in expenses), 2)
 
@@ -964,7 +999,6 @@ def create_correction(date, place):
     else:
         cash_total = round(total_sales - bank_total - expenses_total, 2)
 
-    # items_for_db
     items_for_db = {}
     crates_total = 0
     if isinstance(items, dict) and items:
@@ -1005,15 +1039,9 @@ def create_correction(date, place):
 @app.route("/api/reports/<date>/<place>", methods=["GET"])
 @login_required
 def list_versions_and_summary(date, place):
-    """
-    Returns: { versions: [...], summary: {...} }
-    Versions is a list (possibly empty) of version objects sorted by created_at desc.
-    Summary is a computed place/day summary (uses compute_place_day_summary).
-    """
     place = normalize_place_name(place)
     versions_map = reports_base_ref().child(date).child(place).child("versions").get() or {}
     versions = list(versions_map.values()) if isinstance(versions_map, dict) else (versions_map or [])
-    # sort descending by created_at
     try:
         versions = sorted(versions, key=lambda x: x.get("created_at",""), reverse=True)
     except Exception:
@@ -1084,7 +1112,6 @@ def edit_report_version(date, place, version_id):
         if not missing:
             computed_total_sales = round(total_calc, 2)
 
-    # resolve total_sales
     if computed_total_sales is not None:
         total_sales_final = computed_total_sales
     elif total_sales_override is not None:
@@ -1093,7 +1120,6 @@ def edit_report_version(date, place, version_id):
     else:
         total_sales_final = float(version.get("total_sales") or 0)
 
-    # cash resolution
     if cash_override is not None:
         try: cash_total_final = round(float(cash_override), 2)
         except Exception: return jsonify({"error":"invalid cash_total override"}), 400
@@ -1145,21 +1171,24 @@ def dataman_finalize_version(date, place, version_id):
         return jsonify({"error":"failed to finalize", "details": str(e)}), 500
 
 # ---------- Helper: compute place/day summary ----------
-# ---------- Helper: compute place/day summary (used by role-aware view) ----------
 def _to_list(maybe):
     if maybe is None: return []
     if isinstance(maybe, list): return maybe
     if isinstance(maybe, dict): return list(maybe.values())
     return [maybe]
-
 def compute_place_day_summary(date_str: str, place: str, *, for_role: str = None, username: str = None):
     """
     Build a consistent summary structure for a given date/place.
-    Important fix: if a versioned report exists, include the version's bank_entries and expenses
-    (they may be stored only inside the version node in some DB shapes).
+
+    Important fixes:
+    - If a versioned report exists but that version does NOT contain a snapshot of
+      bank_entries or expenses, fall back to reading the top-level bank_entries/expenses
+      nodes for that date/place (this fixes the 'Bank 0.00' UI when entries are present
+      but not embedded in the version snapshot).
     """
     place = normalize_place_name(place)
     out = {"date": date_str, "place": place}
+
     versions = reports_base_ref().child(date_str).child(place).child("versions").get() or {}
     if versions:
         # versions likely a dict of id->version. pick latest by created_at
@@ -1168,10 +1197,26 @@ def compute_place_day_summary(date_str: str, place: str, *, for_role: str = None
         except Exception:
             # defensive fallback: pick any
             latest = list(versions.values())[0]
+
         # normalize bank_entries & expenses from the version (versions often contain snapshot)
         ver_bank_entries = _to_list(latest.get("bank_entries") or [])
         ver_expenses = _to_list(latest.get("expenses") or [])
-        # compute bank_total/expenses_total from the version if present, else fall back to fields
+
+        # If the version snapshot doesn't include bank_entries/expenses, fall back to top-level nodes
+        if not ver_bank_entries:
+            try:
+                be_map = reports_base_ref().child(date_str).child(place).child("bank_entries").get() or {}
+                ver_bank_entries = list(be_map.values())
+            except Exception:
+                ver_bank_entries = []
+        if not ver_expenses:
+            try:
+                exp_map = reports_base_ref().child(date_str).child(place).child("expenses").get() or {}
+                ver_expenses = list(exp_map.values())
+            except Exception:
+                ver_expenses = []
+
+        # compute bank_total/expenses_total from the version if present, else fall back to fields or computed sums
         try:
             ver_bank_total = float(latest.get("bank_total")) if latest.get("bank_total") is not None else round(sum(float(b.get("amount") or 0) for b in ver_bank_entries), 2)
         except Exception:
@@ -1260,14 +1305,16 @@ def compute_place_day_summary(date_str: str, place: str, *, for_role: str = None
             "bank_total": round(bank_total, 2),
             "sales": sales_list
         })
-    # read top-level bank_entries/expenses when versions absent OR when role requires (van may want only their entries)
+
+    # read top-level bank_entries/expenses when versions absent OR when version snapshot was empty (we already handled version snapshot fallback above)
     if out.get("source") != "report_version":
         be_node = reports_base_ref().child(date_str).child(place).child("bank_entries")
         be_map = be_node.get() or {}
         be_list = list(be_map.values())
     else:
-        # already populated from version
+        # if version provided the bank_entries (or we fell back to top-level earlier) we already have them
         be_list = out.get("bank_entries") or []
+
     if for_role == "van" and username:
         be_list = [b for b in be_list if (b.get("created_by") or "").lower() == username.lower()]
     out["bank_entries"] = sorted(be_list, key=lambda x: x.get("created_at",""))
@@ -1279,6 +1326,7 @@ def compute_place_day_summary(date_str: str, place: str, *, for_role: str = None
         exp_list = list(exp_map.values())
     else:
         exp_list = out.get("expenses") or []
+
     if for_role == "van" and username:
         exp_list = [e for e in exp_list if (e.get("created_by") or "").lower() == username.lower()]
     out["expenses"] = sorted(exp_list, key=lambda x: x.get("created_at",""))
@@ -1290,6 +1338,17 @@ def compute_place_day_summary(date_str: str, place: str, *, for_role: str = None
         out["cash_total_computed"] = out.get("cash_total")
     return out
 
+# Add this route to your existing app.py (near the other dashboard routes)
+
+@app.route("/owner/calculator")
+@login_required
+@role_required("owner")
+def owner_calculator():
+    """
+    Owner-only calculator page.
+    Same UI as sales entry's items table but no submission: owner uses it to compute totals per-place.
+    """
+    return render_template("owner_calculator.html", items=ITEMS, banks=BANKS, places=PLACES)
 # ---------- Role-aware report view endpoint ----------
 @app.route("/api/reports/view", methods=["GET"])
 @login_required
@@ -1404,20 +1463,14 @@ def report_csv():
     return ("CSV endpoint present - use prior implementation", 200)
 
 # ---------- Front-end routes ----------
-# Replace the index() route at the bottom of your app.py with this function
-
-# ---------- Front-end routes ----------
 @app.route("/")
 def index():
     u = current_user()
     if u:
-        # owner -> owner dashboard
         if u.get("role") == "owner":
             return redirect(url_for("owner_dashboard"))
-        # dataman and van should be able to register sales (index is sales registration form)
         if u.get("role") in ("dataman", "van"):
             return render_template("index.html", items=ITEMS, banks=BANKS, places=PLACES)
-    # unauthenticated users and others see sales entry as a starting page
     return render_template("index.html", items=ITEMS, banks=BANKS, places=PLACES)
 
 @app.route("/sales")
@@ -1426,5 +1479,4 @@ def sales_list_page():
     return render_template("sales_list.html", today=today, places=PLACES)
 
 if __name__ == "__main__":
-    # Disable reloader to avoid double initialization and extra DB probes during development
-    app.run(debug=True, port=5000, use_reloader=False)
+    app.run(debug=True, port=5000, use_reloader=True)
