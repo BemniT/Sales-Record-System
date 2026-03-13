@@ -5,18 +5,13 @@
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>{{ title or "Achamyelesh Chefo" }}</title>
 
-    <!-- Google font -->
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;800&display=swap" rel="stylesheet">
-    <!-- Bootstrap -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <!-- App CSS -->
     <link href="{{ url_for('static', filename='css/style.css') }}" rel="stylesheet">
-
   </head>
   <body>
     <nav class="navbar navbar-expand-lg navbar-light bg-white border-bottom fixed-top">
       <div class="container">
-        {# Role-aware brand link: owner -> owner dashboard, dataman -> sales entry, others -> sales list #}
         {% if tmpl_user %}
           {% if tmpl_user.role == 'owner' %}
             <a class="navbar-brand d-flex align-items-center gap-2" href="{{ url_for('owner_dashboard') }}">
@@ -37,9 +32,10 @@
             {% if tmpl_user %}
               {% if tmpl_user.role == 'owner' %}
                 <li class="nav-item"><a class="nav-link" href="{{ url_for('owner_dashboard') }}">Dashboard</a></li>
+                <li class="nav-item"><a class="nav-link" href="{{ url_for('owner_calculator') }}">Calculator</a></li>
               {% elif tmpl_user.role == 'dataman' %}
                 <li class="nav-item"><a class="nav-link" href="{{ url_for('dataman_dashboard') }}">Dashboard</a></li>
-                <li class="nav-item"><a class="nav-link" href="{{ url_for('index') }}">Add Sales</a></li>
+                <li class="nav-item"><a class="nav-link" href="{{ url_for('index') }}">Register Store Sales</a></li>
                 <li class="nav-item"><a class="nav-link" href="{{ url_for('sales_list_page') }}">Sales Report</a></li>
               {% else %}
                 <li class="nav-item"><a class="nav-link" href="{{ url_for('index') }}">Sales</a></li>
@@ -76,6 +72,6 @@
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script src="{{ url_for('static', filename='js/main.js') }}"></script>
-    <script src="{{ url_for('static', filename='js/owner.js') }}"></script>
+    <!-- <script src="{{ url_for('static', filename='js/owner.js') }}"></script> -->
   </body>
 </html>

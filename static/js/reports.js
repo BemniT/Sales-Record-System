@@ -21,6 +21,7 @@ document.addEventListener("DOMContentLoaded", function () {
   const summaryArea = document.getElementById("summaryArea") || document.getElementById("salesResults");
   const topSummary = document.getElementById("topSummary");
   const CURRENT_USER = window.CURRENT_USER || {};
+  const IS_OWNER = (CURRENT_USER.role === "owner");
 
   // Early exit if neither summary area nor load button exist
   if (!summaryArea) {
@@ -177,7 +178,7 @@ document.addEventListener("DOMContentLoaded", function () {
         </div>`;
       summaryArea.appendChild(dateCol);
       const placesContainer = dateCol.querySelector(`#places-${date}`);
-
+      
       for (const [place, vRaw] of Object.entries(places)) {
         const v = normalizeEntry(vRaw);
         // accumulate for owner totals
@@ -237,16 +238,20 @@ document.addEventListener("DOMContentLoaded", function () {
                 <div class="mb-1"><small class="small-muted">Cash</small> <div class="totals-badge">${fmtMoney(v.cash_total_computed)}</div></div>
               </div>
             </div>
-            <div class="mt-3 d-flex gap-2">
-              <button class="btn btn-ghost btn-sm view-details-btn" data-date="${escapeHtml(date)}" data-place="${escapeHtml(place)}"><i class="bi bi-eye me-1"></i>Details</button>
-              <button class="btn btn-outline-secondary btn-sm view-versions-btn" data-date="${escapeHtml(date)}" data-place="${escapeHtml(place)}"><i class="bi bi-stack me-1"></i>Versions</button>
-              <button class="btn btn-outline-info btn-sm export-csv-btn" data-date="${escapeHtml(date)}" data-place="${escapeHtml(place)}"><i class="bi bi-download me-1"></i>CSV</button>
-            </div>
+            <div class="mt-3 d-flex gap-2 flex-wrap">
+  <button class="btn btn-ghost btn-sm view-details-btn" data-date="${escapeHtml(date)}" data-place="${escapeHtml(place)}"><i class="bi bi-eye me-1"></i>Details</button>
+  <button class="btn btn-outline-secondary btn-sm view-versions-btn" data-date="${escapeHtml(date)}" data-place="${escapeHtml(place)}"><i class="bi bi-stack me-1"></i>Versions</button>
+  <button class="btn btn-outline-info btn-sm export-csv-btn" data-date="${escapeHtml(date)}" data-place="${escapeHtml(place)}"><i class="bi bi-download me-1"></i>CSV</button>
+${(CURRENT_USER && CURRENT_USER.role === "owner")
+  ? `<button class="btn btn-outline-warning btn-sm transfer-check-btn" data-date="${escapeHtml(date)}" data-place="${escapeHtml(place)}"><i class="bi bi-bank me-1"></i>Transfer Check</button>`
+  : ``}</div>
             <div class="mt-2 small text-muted">Recent bank entries</div>
             ${bankPreview}
             <div class="details-area" style="display:none;margin-top:12px;"></div>
           </div>`;
         placesContainer.appendChild(cardCol);
+
+        
 
         // Wire details toggle
         const viewBtn = cardCol.querySelector('.view-details-btn');
@@ -273,6 +278,11 @@ document.addEventListener("DOMContentLoaded", function () {
         perCsv && perCsv.addEventListener('click', function () {
           exportPlaceCSV(place, date, date, data.summary);
         });
+
+        const transferBtn = cardCol.querySelector(".transfer-check-btn");
+          transferBtn && transferBtn.addEventListener("click", function () {
+            openTransferCheckModal(date, place, v);
+          });
       }
     } // end for dates
 
@@ -291,6 +301,160 @@ document.addEventListener("DOMContentLoaded", function () {
     if (downloadCsvBtn) downloadCsvBtn.addEventListener("click", () => downloadAggregateCSV());
     if (downloadPdfBtn) downloadPdfBtn.addEventListener("click", () => downloadAggregatePDF());
   }
+
+  async function setTransferStatus(date, place, entryId, transferred) {
+  try {
+    const res = await fetch(`/api/reports/${encodeURIComponent(date)}/${encodeURIComponent(place)}/bank_entry/${encodeURIComponent(entryId)}/transfer_status`, {
+      method: "PATCH",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({ transferred: !!transferred })
+    });
+    const j = await res.json();
+    if (!res.ok) {
+      alert(j.error || "Failed to update transfer status");
+      return false;
+    }
+    return true;
+  } catch (err) {
+    alert("Network error updating transfer status");
+    return false;
+  }
+}
+
+function openTransferCheckModal(date, place, v) {
+  const entries = toList((v.version && v.version.bank_entries && v.version.bank_entries.length) ? v.version.bank_entries : v.bank_entries || []);
+
+  const wrap = document.createElement("div");
+  wrap.innerHTML = `
+    <div class="modal fade" id="transferCheckModal" tabindex="-1" aria-hidden="true">
+      <div class="modal-dialog modal-xl modal-dialog-scrollable">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h5 class="modal-title"><i class="bi bi-bank me-1"></i>Transfer Check — ${escapeHtml(place)} / ${escapeHtml(date)}</h5>
+            <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body">
+            <div class="d-flex justify-content-between align-items-center mb-2">
+              <label class="form-check-label">
+                <input id="onlyNotTransferredChk" class="form-check-input me-1" type="checkbox" checked>
+                Only Not Transferred
+              </label>
+              <div class="d-flex gap-2">
+                <button id="markSelectedTransferredBtn" class="btn btn-success btn-sm">Mark Selected Transferred</button>
+                <button id="refreshTransferModalBtn" class="btn btn-outline-secondary btn-sm">Refresh</button>
+              </div>
+            </div>
+            <div id="transferTableArea"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(wrap);
+
+  const modalEl = document.getElementById("transferCheckModal");
+  const modal = new bootstrap.Modal(modalEl);
+
+  function renderTransferTable() {
+    const onlyNot = document.getElementById("onlyNotTransferredChk").checked;
+    const filtered = entries.filter(e => {
+      const t = ("transferred" in e) ? !!e.transferred : true;
+      return onlyNot ? !t : true;
+    });
+
+    const rows = filtered.map(e => {
+      const t = ("transferred" in e) ? !!e.transferred : true;
+      return `
+        <tr>
+          <td><input type="checkbox" class="bulk-transfer-check" data-id="${escapeHtml(e.id || "")}" ${t ? "disabled" : ""}></td>
+          <td>${escapeHtml(e.bank || e.display || "")}</td>
+          <td class="text-end">${fmtMoney(e.amount || 0)}</td>
+          <td>${escapeHtml(e.customer || "")}</td>
+          <td>${t ? `<span class="badge bg-success">Transferred</span>` : `<span class="badge bg-danger">Not transferred</span>`}</td>
+          <td>
+            <button class="btn btn-sm btn-outline-success single-transfer-yes" data-id="${escapeHtml(e.id || "")}">Yes</button>
+            <button class="btn btn-sm btn-outline-danger single-transfer-no" data-id="${escapeHtml(e.id || "")}">No</button>
+          </td>
+        </tr>
+      `;
+    }).join("");
+
+    document.getElementById("transferTableArea").innerHTML = `
+      <div class="table-responsive">
+        <table class="table table-sm">
+          <thead>
+            <tr><th></th><th>Bank</th><th class="text-end">Amount</th><th>Customer</th><th>Status</th><th>Action</th></tr>
+          </thead>
+          <tbody>
+            ${rows || `<tr><td colspan="6" class="text-muted">No matching entries</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+    `;
+
+    document.querySelectorAll(".single-transfer-yes").forEach(btn => {
+      btn.addEventListener("click", async function () {
+        const id = this.dataset.id;
+        const ok = await setTransferStatus(date, place, id, true);
+        if (ok) {
+          const item = entries.find(x => x.id === id);
+          if (item) item.transferred = true;
+          showToast("Updated");
+          renderTransferTable();
+          loadSummary();
+        }
+      });
+    });
+
+    document.querySelectorAll(".single-transfer-no").forEach(btn => {
+      btn.addEventListener("click", async function () {
+        const id = this.dataset.id;
+        const ok = await setTransferStatus(date, place, id, false);
+        if (ok) {
+          const item = entries.find(x => x.id === id);
+          if (item) item.transferred = false;
+          showToast("Updated");
+          renderTransferTable();
+          loadSummary();
+        }
+      });
+    });
+  }
+
+  modalEl.addEventListener("shown.bs.modal", () => {
+    renderTransferTable();
+
+    document.getElementById("onlyNotTransferredChk").addEventListener("change", renderTransferTable);
+    document.getElementById("refreshTransferModalBtn").addEventListener("click", renderTransferTable);
+
+    document.getElementById("markSelectedTransferredBtn").addEventListener("click", async () => {
+      const checked = Array.from(document.querySelectorAll(".bulk-transfer-check:checked"));
+      if (!checked.length) {
+        alert("Select at least one row");
+        return;
+      }
+
+      for (const cb of checked) {
+        const id = cb.dataset.id;
+        const ok = await setTransferStatus(date, place, id, true);
+        if (ok) {
+          const item = entries.find(x => x.id === id);
+          if (item) item.transferred = true;
+        }
+      }
+
+      showToast("Selected entries marked transferred");
+      renderTransferTable();
+      loadSummary();
+    });
+  });
+
+  modalEl.addEventListener("hidden.bs.modal", () => {
+    wrap.remove();
+  });
+
+  modal.show();
+}
 
   // Fallback mapping helper (best-effort display name)
   function DBKeyToDisplayFallback(k) { return String(k).replace(/_/g, " "); }
@@ -357,24 +521,99 @@ document.addEventListener("DOMContentLoaded", function () {
     container.appendChild(itemsCard);
 
     // Bank entries
+        // Bank entries
     const beCard = document.createElement("div");
     beCard.className = "mb-3";
     beCard.innerHTML = `<h6 class="mb-2"><i class="bi bi-bank2 me-1"></i>Bank entries</h6>`;
     const bankEntries = toList((v.version && v.version.bank_entries && v.version.bank_entries.length) ? v.version.bank_entries : v.bank_entries || []);
+
     if (bankEntries && bankEntries.length) {
-      let beRows = bankEntries.map(b => {
+      const beRows = bankEntries.map(b => {
         const bank = escapeHtml(b.bank || b.display || "");
         const amt = fmtMoney(b.amount || 0);
         const cust = escapeHtml(b.customer || "");
         const by = escapeHtml(b.created_by || "");
         const at = formatDateTime(b.created_at || "");
-        return `<tr><td>${bank}</td><td class="text-end">${amt}</td><td>${cust}</td><td>${by}</td><td>${at}</td></tr>`;
+        const transferred = (("transferred" in b) ? !!b.transferred : true);
+
+        let transferCell = transferred
+          ? `<span class="badge bg-success">Transferred</span>`
+          : `<span class="badge bg-danger">Not transferred</span>`;
+
+        if ((CURRENT_USER && CURRENT_USER.role) === "owner" && b.id) {
+          transferCell += `
+            <div class="mt-1 d-flex gap-1">
+              <button class="btn btn-sm btn-outline-success be-transfer-toggle"
+                      data-id="${escapeHtml(b.id)}"
+                      data-date="${escapeHtml(date)}"
+                      data-place="${escapeHtml(place)}"
+                      data-transferred="true">Mark Yes</button>
+              <button class="btn btn-sm btn-outline-danger be-transfer-toggle"
+                      data-id="${escapeHtml(b.id)}"
+                      data-date="${escapeHtml(date)}"
+                      data-place="${escapeHtml(place)}"
+                      data-transferred="false">Mark No</button>
+            </div>`;
+        }
+
+        return `<tr>
+          <td>${bank}</td>
+          <td class="text-end">${amt}</td>
+          <td>${cust}</td>
+          <td>${by}</td>
+          <td>${at}</td>
+          <td>${transferCell}</td>
+        </tr>`;
       }).join("");
-      beCard.innerHTML += `<div class="table-responsive"><table class="table table-sm"><thead><tr><th>Bank</th><th class="text-end">Amount</th><th>Customer</th><th>By</th><th>At</th></tr></thead><tbody>${beRows}</tbody></table></div>`;
+
+      beCard.innerHTML += `
+        <div class="table-responsive">
+          <table class="table table-sm">
+            <thead>
+              <tr>
+                <th>Bank</th>
+                <th class="text-end">Amount</th>
+                <th>Customer</th>
+                <th>By</th>
+                <th>At</th>
+                <th>Transfer</th>
+              </tr>
+            </thead>
+            <tbody>${beRows}</tbody>
+          </table>
+        </div>
+        <div class="small text-muted">Only transferred entries are included in audit bank totals.</div>
+      `;
     } else {
       beCard.innerHTML += `<div class="small-muted">No bank entries</div>`;
     }
     container.appendChild(beCard);
+
+    // owner transfer-status handlers
+    beCard.querySelectorAll(".be-transfer-toggle").forEach(btn => {
+      btn.addEventListener("click", async function(){
+        const entryId = this.dataset.id;
+        const d = this.dataset.date;
+        const p = this.dataset.place;
+        const tr = this.dataset.transferred === "true";
+        try {
+          const res = await fetch(`/api/reports/${encodeURIComponent(d)}/${encodeURIComponent(p)}/bank_entry/${encodeURIComponent(entryId)}/transfer_status`, {
+            method: "PATCH",
+            headers: {"Content-Type":"application/json"},
+            body: JSON.stringify({ transferred: tr })
+          });
+          const j = await res.json();
+          if (!res.ok) {
+            alert(j.error || "Failed to update transfer status");
+            return;
+          }
+          showToast("Transfer status updated");
+          if (typeof loadSummary === "function") loadSummary();
+        } catch (err) {
+          alert("Network error updating transfer status");
+        }
+      });
+    });
 
     // Expenses
     const exCard = document.createElement("div");
