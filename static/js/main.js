@@ -98,25 +98,29 @@ document.addEventListener("DOMContentLoaded", function(){
         placeEl.disabled = true;
       }
     } else if (CU.role === "dataman") {
-      if (placeEl){
-        placeEl.innerHTML = "";
-        const opt = document.createElement("option");
-        opt.value = "Store";
-        opt.innerText = "Store";
-        placeEl.appendChild(opt);
-        placeEl.value = "Store";
-        placeEl.disabled = true;
-      }
-      if (salesmanSelect){
-        salesmanSelect.innerHTML = "";
-        const opt = document.createElement("option");
-        opt.value = "Store";
-        opt.innerText = "Store";
-        salesmanSelect.appendChild(opt);
-        salesmanSelect.value = "Store";
-        salesmanSelect.disabled = true;
-      }
-    } else {
+  // Dataman can register Store, Dawa, Shet
+  if (placeEl){
+    placeEl.innerHTML = "";
+    ["Store", "Dawa", "Shet"].forEach(p => {
+      const opt = document.createElement("option");
+      opt.value = p;
+      opt.innerText = p;
+      placeEl.appendChild(opt);
+    });
+    placeEl.value = "Store";
+    placeEl.disabled = false; // allow switching among Store/Dawa/Shet
+  }
+
+  if (salesmanSelect){
+    salesmanSelect.innerHTML = "";
+    const opt = document.createElement("option");
+    opt.value = "Store";
+    opt.innerText = "Store";
+    salesmanSelect.appendChild(opt);
+    salesmanSelect.value = "Store";
+    salesmanSelect.disabled = true;
+  }
+}else {
       if (placeEl) placeEl.disabled = false;
     }
 
